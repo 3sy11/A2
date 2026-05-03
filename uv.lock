@@ -1,6 +1,5 @@
 version = 1
-revision = 3
-requires-python = "==3.12.13"
+requires-python = "==3.12.8"
 
 [[package]]
 name = "a2"
