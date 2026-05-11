@@ -2,22 +2,27 @@
 
 ## Context
 
-bollydog 的核心原则：**Service 之间不直接调用，通过 Command 在 Hub 中调度。** Command 运行在 Hub 上下文中，可以通过 `app.resolve()` 访问任意 Service。Service 之间的调用必须通过 `yield SubCommand()` 委托给 Hub。
+bollydog 的核心原则：**Service 之间不直接调用，通过 Command 在 Hub 中调度。** Command 运行在 Hub 上下文中，通过 `AppService._apps['key']` 访问其他 Service。Service 之间的调用必须通过 `yield SubCommand()` 委托给 Hub。
 
 当前设计中有若干处 Service 直接调用 Service 的情况（详见 [00-master-plan.md](00-master-plan.md) 第九节），需要逐一抽取为 Command。
 
 ## 核心原则
 
+> **API 约定**：Command 内部通过 `AppService._apps['key']` 访问其他服务，通过 `globals.app` 访问所属服务。
+> 详见 [10-bollydog-integration-conventions.md](10-bollydog-integration-conventions.md)。
+
 ```
 允许的调用方式：
-  Command → app.resolve(Service).method()     ✅ Command 在 Hub 上下文中
-  Service → self._injected.method()           ✅ 通过 depends 注入
-  Command → yield SubCommand()                 ✅ Hub 调度
+  Command → AppService._apps['key'].method()  ✅ 通过 _apps 全局注册表
+  Command → app.method()                       ✅ globals.app 访问所属服务
+  Service → self._injected.method()            ✅ 通过 depends 注入
+  Command → yield SubCommand()                  ✅ Hub 调度
 
 禁止的调用方式：
-  Service → app.resolve(OtherService).method() ❌ 绕过 depends
-  Service → self._not_injected.method()        ❌ 属性不存在
-  Tool → self._xxx_service.method()            ❌ Tool 只有 self._service
+  Service → AppService._apps['key'].method()   ❌ 绕过 depends
+  Service → self._not_injected.method()         ❌ 属性不存在
+  Tool → self._xxx_service.method()             ❌ Tool 只有 self._service
+  Command → app.resolve('key')                  ❌ API 不存在
 ```
 
 ## 需要 Command 化的调用清单
@@ -43,6 +48,8 @@ response = await self._llm.chat(
 **Command 化后：**
 ```python
 # skills/commands.py
+from bollydog.models.service import AppService
+
 class ExtractPatternCommand(BaseCommand):
     """从执行轨迹中提取技能模式。"""
     alias = 'ExtractPattern'
@@ -50,7 +57,7 @@ class ExtractPatternCommand(BaseCommand):
     capability: str = 'fast'
 
     async def __call__(self):
-        llm = app.resolve('a2.LLMService')
+        llm = AppService._apps['a2.LLMService']
         return await llm.chat(
             messages=[{'role': 'user', 'content': self.trajectory}],
             capability=self.capability,
@@ -94,7 +101,7 @@ class CrystallizeSkillCommand(BaseCommand):
         )
 
         # 2. 创建并保存技能
-        skill_service = app.resolve('a2.SkillService')
+        skill_service = AppService._apps['a2.SkillService']
         skill = Skill.from_pattern(pattern, self.task_content)
         await skill_service.save_skill(skill)
 
@@ -129,7 +136,7 @@ class NotifyIndexUpdateCommand(BaseCommand):
     action: str = 'add'  # 'add' | 'remove' | 'update'
 
     async def __call__(self):
-        l1 = app.resolve('a2.memory.l1.L1InsightIndexService')
+        l1 = AppService._apps['a2.memory.l1.L1InsightIndexService']
         if self.action == 'add':
             await l1.add_skill(self.skill_name, self.skill_desc)
         elif self.action == 'remove':
@@ -170,7 +177,7 @@ class SpawnSubagentCommand(BaseCommand):
     capability: str = None
 
     async def __call__(self):
-        subagent_svc = app.resolve('a2.SubagentService')
+        subagent_svc = AppService._apps['a2.SubagentService']
         return await subagent_svc.spawn(
             task=self.task,
             agent_type=self.agent_type,
@@ -187,10 +194,10 @@ class SubagentTool(Tool):
     description = '委派子任务给专门的子智能体'
 
     async def execute(self, agent_type: str, prompt: str, **kw) -> str:
+        from bollydog.globals import hub
         cmd = SpawnSubagentCommand(task=prompt, agent_type=agent_type)
-        hub = app.resolve_hub()
         result = await hub.execute(cmd)
-        return result.summary
+        return str(await result.state)
 ```
 
 ---
@@ -229,10 +236,10 @@ class AgentService(AppService):
 
 | 调用 | 方式 | 原因 |
 |------|------|------|
-| ReActStepCommand → LLMService | `app.resolve()` | Command 内，标准模式 |
-| ReActStepCommand → ToolService | `app.resolve()` | Command 内，标准模式 |
-| PlanCommand → LLMService | `app.resolve()` | Command 内，标准模式 |
-| ReflexionCommand → LLMService | `app.resolve()` | Command 内，标准模式 |
+| ReActStepCommand → LLMService | `AppService._apps['key']` | Command 内，标准模式 |
+| ReActStepCommand → ToolService | `AppService._apps['key']` | Command 内，标准模式 |
+| PlanCommand → LLMService | `AppService._apps['key']` | Command 内，标准模式 |
+| ReflexionCommand → LLMService | `AppService._apps['key']` | Command 内，标准模式 |
 | ContextService → MemoryService | `self._memory` | depends 注入 |
 | ContextService → LLMService | `self._llm` | depends 注入 |
 | SubagentService → LLMService | `self._llm` | depends 注入 |
@@ -302,30 +309,31 @@ Hub dispatch
 └── AgentCommand.__call__()
     │
     ├── yield PlanCommand(goal)
-    │   └── app.resolve('a2.LLMService').chat()         ← Command 内
+    │   └── AppService._apps['a2.LLMService'].chat()       ← Command 内
     │
     └── for task in task_list.pending():
         │
         ├── yield ReflexionCommand(task) 或 ReActStepCommand(task)
         │   │
         │   └── ReActStepCommand.__call__():
-        │       ├── app.resolve('a2.LLMService').chat()  ← Command 内
-        │       ├── app.resolve('a2.ToolService').execute()
+        │       ├── AppService._apps['a2.LLMService'].chat()  ← Command 内
+        │       ├── AppService._apps['a2.ToolService'].execute()
         │       │   └── SubagentTool.execute()
-        │       │       └── yield SpawnSubagentCommand() ← Hub 调度
+        │       │       └── hub.execute(SpawnSubagentCommand)  ← Hub 调度
         │       │           └── SubagentService.spawn()
-        │       │               ├── self._llm.chat()     ← depends
-        │       │               └── self._tool_service   ← depends
+        │       │               ├── self._llm.chat()           ← depends
+        │       │               └── self._tool_service         ← depends
         │       │
-        │       └── ContextService.update(result)        ← Command 内
+        │       └── ContextService.update(result)              ← Command 内
         │
         └── (任务成功，tool_call_count ≥ 3)
-            └── yield CrystallizeSkillCommand()          ← Hub 调度
-                ├── yield ExtractPatternCommand()        ← Hub 调度
-                │   └── app.resolve('a2.LLMService').chat()
-                ├── app.resolve('a2.SkillService').save_skill()
-                └── yield NotifyIndexUpdateCommand()     ← Hub 调度
-                    └── app.resolve('a2.memory.l1.L1InsightIndexService').add_skill()
+            └── yield CrystallizeSkillCommand()                ← Hub 调度
+                ├── yield ExtractPatternCommand()              ← Hub 调度
+                │   └── AppService._apps['a2.LLMService'].chat()
+                ├── AppService._apps['a2.SkillService'].save_skill()
+                └── yield NotifyIndexUpdateCommand()           ← Hub 调度
+                    └── AppService._apps['a2.memory.l1...'].add_skill()
 ```
 
 **所有跨服务调用都经过 Hub 调度或 depends 注入，无直接 Service → Service 调用。**
+**Command 通过 `AppService._apps['key']` 访问其他服务（见 [10-bollydog-integration-conventions.md](10-bollydog-integration-conventions.md)）。**

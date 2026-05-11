@@ -233,10 +233,21 @@ class SSHProtocol(TerminalProtocol):
 ### Environment Service（环境服务）
 
 ```python
-class LocalToolService(AppService):
-    """本地执行环境。protocol 通过标准 bollydog TOML 配置注入。"""
-    domain = 'a2.env'
+class LocalToolService(EnvironmentService):
+    """本地执行环境。Protocol 由 TOML 注入。"""
+    domain = 'a2.env.local'
     alias = 'LocalToolService'
+
+    async def upload(self, local_path: str, remote_path: str) -> str:
+        return await self.protocol.upload(local_path, remote_path)
+
+    async def download(self, remote_path: str, local_path: str) -> str:
+        return await self.protocol.download(remote_path, local_path)
+
+
+class EnvironmentService(AppService, abstract=True):
+    """通用环境服务基类——消除 Local/Docker/SSH 的重复代码。
+    所有操作委托给 TOML 注入的 TerminalProtocol。"""
     depends = []
 
     async def execute(self, command: str, timeout: int = 30) -> str:
@@ -255,61 +266,30 @@ class LocalToolService(AppService):
         return await self.protocol.download(remote_path, local_path)
 
 
-class DockerToolService(AppService):
-    """Docker 执行环境。"""
-    domain = 'a2.env'
+class DockerToolService(EnvironmentService):
+    """Docker 执行环境。Protocol 由 TOML 注入。"""
+    domain = 'a2.env.docker'
     alias = 'DockerToolService'
-    depends = []
-
-    async def execute(self, command: str, timeout: int = 30) -> str:
-        return await self.protocol.execute(command, timeout)
-
-    async def read_file(self, path: str, offset: int = 0, limit: int = 2000) -> str:
-        return await self.protocol.read_file(path, offset, limit)
-
-    async def write_file(self, path: str, content: str) -> str:
-        return await self.protocol.write_file(path, content)
-
-    async def upload(self, local_path: str, remote_path: str) -> str:
-        return await self.protocol.upload(local_path, remote_path)
-
-    async def download(self, remote_path: str, local_path: str) -> str:
-        return await self.protocol.download(remote_path, local_path)
 
 
-class SSHToolService(AppService):
-    """SSH 远程执行环境。"""
-    domain = 'a2.env'
+class SSHToolService(EnvironmentService):
+    """SSH 远程执行环境。Protocol 由 TOML 注入。"""
+    domain = 'a2.env.ssh'
     alias = 'SSHToolService'
-    depends = []
-
-    async def execute(self, command: str, timeout: int = 30) -> str:
-        return await self.protocol.execute(command, timeout)
-
-    async def read_file(self, path: str, offset: int = 0, limit: int = 2000) -> str:
-        return await self.protocol.read_file(path, offset, limit)
-
-    async def write_file(self, path: str, content: str) -> str:
-        return await self.protocol.write_file(path, content)
-
-    async def upload(self, local_path: str, remote_path: str) -> str:
-        return await self.protocol.upload(local_path, remote_path)
-
-    async def download(self, remote_path: str, local_path: str) -> str:
-        return await self.protocol.download(remote_path, local_path)
 ```
 
 ### Tool (Base Class)
 
 ```python
 class Tool(BaseCommand, abstract=True):
-    """工具基类。协议无关——只调用 self._service，不直接调用 protocol。"""
+    """工具基类。协议无关——只调用 self._service，不直接调用 protocol。
+    abstract=True 防止 __init_subclass__ 注册到 BaseService.registry。"""
     name: ClassVar[str]
     description: ClassVar[str]
     parameters: ClassVar[dict]
     is_destructive: ClassVar[bool] = False
-    provider: ClassVar[str] = None      # 直接指定 provider 名称（精确，如 'claude-opus'）
-    capability: ClassVar[str] = None    # 指定能力级别（模糊，如 'fast'/'capable'/'code'）
+    provider: ClassVar[str] = None
+    capability: ClassVar[str] = None
 
     _service: 'ToolService' = None
 
@@ -319,12 +299,30 @@ class Tool(BaseCommand, abstract=True):
     async def execute(self, **kwargs) -> str:
         raise NotImplementedError
 
+    def cast_params(self, params: dict) -> dict:
+        """根据 parameters schema 做类型转换（str→int 等）。"""
+        props = self.parameters.get('properties', {})
+        for k, v in list(params.items()):
+            spec = props.get(k, {})
+            if spec.get('type') == 'integer' and isinstance(v, str):
+                params[k] = int(v)
+            elif spec.get('type') == 'boolean' and isinstance(v, str):
+                params[k] = v.lower() in ('true', '1')
+        return params
+
+    def validate_params(self, params: dict) -> list[str]:
+        """校验必填参数。返回错误列表，空列表表示通过。"""
+        errors = []
+        for field in self.parameters.get('required', []):
+            if field not in params:
+                errors.append(f"Missing required parameter: {field}")
+        return errors
+
     def to_schema(self) -> dict:
         return {
             'type': 'function',
             'function': {
-                'name': self.name,
-                'description': self.description,
+                'name': self.name, 'description': self.description,
                 'parameters': self.parameters,
             }
         }
@@ -342,20 +340,23 @@ class ToolService(AppService):
         'a2.env.docker.DockerToolService',
         'a2.env.ssh.SSHToolService',
     ]
+    # ↑ depends 键精确匹配各服务的 {domain}.{alias}
+    # 见 10-bollydog-integration-conventions.md §2
 
     _tools: dict[str, Tool] = {}
-    _tool_env: dict[str, str] = {}      # tool_name → env_name
-    _envs: dict[str, AppService] = {}    # env_name → environment service
+    _tool_env: dict[str, str] = {}
+    _envs: dict[str, AppService] = {}
 
     _hint: str = "\n\n[Analyze the error above and try a different approach.]"
 
-    async def on_start(self):
-        # 1. 注册环境服务引用
-        self._envs = {
-            'local': self._local,      # 由 depends 自动注入
-            'docker': self._docker,
-            'ssh': self._ssh,
-        }
+    async def on_started(self):
+        # 1. 从 depends 注入的 _children 中解析环境服务引用
+        for dep in self._children:
+            if isinstance(dep, Protocol): continue
+            name = type(dep).__name__.replace('ToolService', '').lower()
+            if name: self._envs[name] = dep
+        if not self._envs.get('local'):
+            self._envs['local'] = self._children[0]
 
         # 2. 注册内置工具
         enabled = self.config.get('enabled_tools', {})
@@ -638,9 +639,12 @@ class SubagentTool(Tool):
     }
 
     async def execute(self, agent_type: str, prompt: str, **kw) -> str:
-        result = await self._subagent_service.spawn(
-            task=prompt, agent_type=agent_type)
-        return result.summary
+        # 通过 Hub dispatch SpawnSubagentCommand（见 15-command-separation.md）
+        from bollydog.globals import hub
+        from a2.subagent.commands import SpawnSubagentCommand
+        cmd = SpawnSubagentCommand(task=prompt, agent_type=agent_type)
+        result = await hub.execute(cmd)
+        return str(await result.state)
 
 
 class AskUserTool(Tool):

@@ -142,6 +142,7 @@ class TaskList(BaseModel):
 # planner/commands.py
 from bollydog.models.base import BaseCommand
 from bollydog.globals import session, message, app
+from bollydog.models.service import AppService
 from .models import Task, TaskList
 
 
@@ -156,8 +157,8 @@ class ReActStepCommand(BaseCommand):
 
     async def __call__(self):
         history = []
-        llm_service = app.resolve('a2.LLMService')
-        tool_service = app.resolve('a2.ToolService')
+        llm_service = AppService._apps['a2.LLMService']
+        tool_service = AppService._apps['a2.ToolService']
 
         for step in range(self.max_steps):
             # Reason: LLM 决策
@@ -212,7 +213,7 @@ class PlanCommand(BaseCommand):
     run_id: str
 
     async def __call__(self):
-        llm_service = app.resolve('a2.LLMService')
+        llm_service = AppService._apps['a2.LLMService']
 
         # LLM 生成计划
         prompt = f"""分析以下任务，分解为编号步骤。
@@ -241,8 +242,7 @@ class PlanCommand(BaseCommand):
         # 存入 session（运行时共享）
         await session.set(self.run_id, task_list.model_dump())
 
-        # 持久化到 protocol（压缩后存活）
-        planner_svc = app.resolve('a2.PlannerService')
+        planner_svc = AppService._apps['a2.PlannerService']
         await planner_svc.save_task_list(task_list)
 
         return task_list
@@ -262,7 +262,7 @@ class ReflexionCommand(BaseCommand):
 
     async def __call__(self):
         current_task = self.task
-        llm_service = app.resolve('a2.LLMService')
+        llm_service = AppService._apps['a2.LLMService']
 
         for attempt in range(self.max_retries):
             # yield 委托给内层 = 装饰器的 self._inner.run()
@@ -349,8 +349,7 @@ class RunAgentCommand(BaseCommand):
             task_list.update_task(task.id, status=status, result=result.get("result"))
             await session.set(run_id, task_list.model_dump())
 
-            # 持久化
-            planner_svc = app.resolve('a2.PlannerService')
+            planner_svc = AppService._apps['a2.PlannerService']
             await planner_svc.save_task_list(task_list)
 
             yield {"type": "progress", "task_id": task.id, "status": status}

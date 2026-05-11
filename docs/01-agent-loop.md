@@ -64,62 +64,59 @@ AgentCommand.__call__()  [async generator, yield StreamState chunks]
 ### AgentCommand (BaseCommand)
 
 ```python
+from bollydog.globals import app, message
+from bollydog.models.service import AppService
+
 class AgentCommand(BaseCommand, abstract=True):
     """Agent 命令基类。使用 bollydog 的 async generator 模式：
-    yield SubCommand() 用于顺序执行，yield [cmd1, cmd2] 用于并行扇出。"""
+    yield SubCommand() 用于顺序执行，yield [cmd1, cmd2] 用于并行扇出。
+    通过 globals.app 访问所属 AgentService，通过 AppService._apps 访问其他服务。"""
     alias: ClassVar[str] = 'AgentCommand'
     max_turns: ClassVar[int] = 50
-    stream: ClassVar[bool] = True
+    qos: int = 0  # 流式命令不走队列
 
-    def __init__(self, *, service: 'AgentService', **kwargs):
-        super().__init__(**kwargs)
-        self._service = service
-        self._turn_count = 0
+    goal: str = ''
 
-    async def __call__(self, **kwargs) -> AsyncGenerator[dict, None]:
+    async def __call__(self) -> AsyncGenerator[dict, None]:
         """主 Agent 循环——async generator，yield 流式 chunk。
 
         两阶段架构：
         1. 规划阶段：yield PlanCommand（可选）生成 TaskList
         2. 执行阶段：逐任务 yield ReflexionCommand 或 ReActStepCommand
+
+        服务访问约定（见 10-bollydog-integration-conventions.md）：
+        - globals.app → 所属 AgentService 的业务方法
+        - AppService._apps['key'] → 其他服务实例
         """
-        goal = kwargs.get('user_message', '')
-        planner = self._service.planner
+        planner = AppService._apps['a2.PlannerService']
 
         # ── Phase 1: 规划（可选）──
         if planner.use_planning:
-            # yield PlanCommand → Hub 调度 → 返回 TaskList
-            task_list = yield PlanCommand(goal=goal, run_id=message.trace_id)
+            task_list = yield PlanCommand(goal=self.goal, run_id=message.trace_id)
         else:
             task_list = TaskList(
-                run_id=message.trace_id,
-                goal=goal,
-                tasks=[Task(content=goal)],
+                run_id=message.trace_id, goal=self.goal,
+                tasks=[Task(content=self.goal)],
             )
 
         # ── Phase 2: 逐任务执行 ──
         for task in task_list.pending():
-            # 更新状态
             task_list.update_task(task.id, status="in_progress")
             yield {'type': 'progress', 'task_id': task.id, 'status': 'in_progress'}
 
-            # 套哪层
             if planner.use_reflexion:
                 result = yield ReflexionCommand(task=task, run_id=task_list.run_id)
             else:
                 result = yield ReActStepCommand(task=task, run_id=task_list.run_id)
 
-            # 更新结果
             status = "done" if result["success"] else "failed"
             task_list.update_task(task.id, status=status, result=result.get("result"))
             yield {'type': 'progress', 'task_id': task.id, 'status': status}
 
-            # 失败时停止
             if not result["success"]:
                 yield {'type': 'text', 'content': f"任务失败: {task.content}\n{result.get('result', '')}"}
                 return
 
-        # 完成
         yield {'type': 'text', 'content': task_list.render_progress()}
 ```
 
@@ -158,8 +155,8 @@ class AgentService(AppService):
         return '\n\n'.join(filter(None, sections))
 
     def _dynamic_skill_index(self) -> str:
-        """动态段：技能索引（来自 SkillService）。"""
-        return self._skill_service.get_metadata_prompt()
+        """动态段：技能索引（来自 SkillService，通过 depends 注入）。"""
+        return self._skill_svc.get_metadata_prompt()
 
     def _dynamic_memory_context(self) -> str:
         """动态段：记忆上下文（来自 MemoryService）。"""
@@ -169,29 +166,39 @@ class AgentService(AppService):
 
 ## 与 bollydog Hub 的集成
 
-关键集成点是 Hub 的 `_run_gen` 方法，它已经处理 async generators：
+关键集成点是 Hub 的 `_run_gen` 方法，它已经处理 async generators。
+
+**`_run_gen` 的精确语义**（双向通信，非简单迭代）：
 
 ```python
-# 在 Hub._run_gen（bollydog/service/app.py）中：
+# bollydog/service/app.py — Hub._run_gen 实际代码精简
 async def _run_gen(self, message):
-    async for chunk in message():
-        if isinstance(chunk, list):
-            # 并行扇出：yield [cmd1, cmd2]
-            results = await self.gather(chunk)
-            for r in results:
-                message.state.put_nowait(r)
-        elif isinstance(chunk, BaseCommand):
-            # 顺序：yield SubCommand()
-            await self.dispatch(chunk)
-            await chunk.state
-            message.state.put_nowait(chunk.state.result())
+    gen = message()
+    feedback, pending = None, []
+    while True:
+        value = pending.pop() if pending else await gen.asend(feedback)
+        if isinstance(value, (list, tuple)):
+            # 并行扇出：yield [cmd1, cmd2] → gather → feedback = [result1, result2]
+            subs = [await self.dispatch(cmd) for cmd in value]
+            feedback = await asyncio.gather(*(sub.state for sub in subs))
+        elif isinstance(value, Message):
+            # 顺序：yield SubCommand() → dispatch → feedback = sub.state result
+            sub = await self.dispatch(value)
+            try:
+                feedback = await sub.state
+            except Exception as exc:
+                pending.append(await gen.athrow(exc))
+                feedback = None
         else:
-            # 普通数据：yield dict（流式输出）
-            message.state.put_nowait(chunk)
-    message.state.put_nowait(None)  # 信号完成
+            # 流式输出：yield dict → StreamState.put
+            feedback = None
+            await message.state.put(value)
 ```
 
-`AgentCommand.__call__` yield dict（流式 chunk），通过 `_run_gen` 流入 `StreamState`，支持 `await agent_cmd`（获取所有结果）和 `async for chunk in agent_cmd`（流式）两种模式。
+**关键机制**：`gen.asend(feedback)` 实现双向通信——yield 表达式的返回值就是子命令的执行结果。
+例如 `task_list = yield PlanCommand(...)` 中 `task_list` 接收 PlanCommand 的返回值。
+
+`AgentCommand.__call__` yield dict（流式 chunk），通过 `_run_gen` 流入 `StreamState`，支持 `await agent_cmd.state`（获取所有结果）和 `async for chunk in agent_cmd.state`（流式）两种模式。
 
 ## 错误恢复
 

@@ -1,7 +1,14 @@
 [project]
 name = "a2"
 version = "0.1.0"
-description = "Add your description here"
+description = "AI Agent framework built on bollydog"
 readme = "README.md"
-requires-python = "==3.12.8"
-dependencies = []
+requires-python = ">=3.12"
+dependencies = [
+    "bollydog>=0.1.0",
+]
+
+[project.optional-dependencies]
+llm = ["openai>=1.0.0", "anthropic>=0.20.0"]
+mcp = ["mcp>=1.0.0"]
+all = ["openai>=1.0.0", "anthropic>=0.20.0", "mcp>=1.0.0", "tiktoken>=0.5.0"]

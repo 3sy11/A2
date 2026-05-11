@@ -254,79 +254,73 @@ hub = await load_from_config(config)
 
 ## CLI 入口
 
+使用 bollydog 的 fire CLI 模式保持一致性（bollydog 用 python-fire）：
+
 ```python
-# cli.py
-import asyncio
-import click
+# cli.py — 复用 bollydog CLI 模式
+from bollydog.service import load_from_config
+from bollydog.service.app import Hub
+from bollydog.bootstrap import Bootstrap
+from bollydog.models.base import BaseCommand, BaseService
+import fire
 
-@click.command()
-@click.option('--config', '-c', default='agent.toml', help='配置文件路径')
-@click.option('--message', '-m', help='单条消息模式（非交互）')
-@click.option('--stream/--no-stream', default=True, help='启用流式输出')
-def main(config: str, message: str, stream: bool):
-    """A2 Agent CLI。"""
-    from bollydog.service import load_from_config
-    svc_config = toml.load(config)
-    hub = asyncio.run(load_from_config(svc_config))
+class CLI:
+    @staticmethod
+    def service(config: str = 'agent.toml'):
+        """启动 Agent 服务（HTTP/WS/UDS）。"""
+        load_from_config(config)
+        hub = Hub()
+        raise Bootstrap(hub, override_logging=False).execute_from_commandline()
 
-    if message:
-        # 单条消息模式
-        cmd = AgentCommand(service=hub._get_agent_service(), user_message=message)
-        asyncio.run(hub.execute(cmd))
-    else:
-        # 交互式 REPL
-        asyncio.run(_repl(hub))
+    @staticmethod
+    def execute(command: str = 'Chat', config: str = 'agent.toml', **kwargs):
+        """直接执行一条命令。"""
+        load_from_config(config)
+        hub = Hub()
+        cmd_cls = BaseService.registry.get(command) or BaseService.registry[f'a2.AgentService.{command}']
+        msg = cmd_cls(**kwargs)
+        import asyncio
+        async def _run():
+            async with hub:
+                await hub.execute(msg)
+        asyncio.run(_run())
 
-async def _repl(hub):
-    """交互式 REPL 循环。"""
-    agent_svc = hub._get_agent_service()
-    print("Agent 就绪。输入消息（或 'exit' 退出，'clear' 重置）。\n")
-    while True:
-        user_input = input("You> ").strip()
-        if user_input.lower() == 'exit':
-            break
-        if user_input.lower() == 'clear':
-            agent_svc.context_manager.reset()
-            print("上下文已清除。\n")
-            continue
+    @staticmethod
+    def chat(message: str, config: str = 'agent.toml'):
+        """单条消息模式。"""
+        CLI.execute('Chat', config=config, user_message=message)
 
-        cmd = AgentCommand(service=agent_svc, user_message=user_input)
-        async for chunk in hub.execute(cmd):
-            if chunk.get('type') == 'text':
-                print(f"\nAgent: {chunk['content']}")
-            elif chunk.get('type') == 'tool_result':
-                print(f"  [{chunk['name']}] {chunk['content'][:200]}")
+    @staticmethod
+    def ls(config: str = 'agent.toml'):
+        """列出所有注册的命令。"""
+        load_from_config(config)
+        from bollydog.entrypoint.cli import CLI as BolCLI
+        BolCLI.ls(config=config)
+
+def main():
+    fire.Fire(CLI)
 ```
 
 ## HTTP/WS 入口
 
+使用 bollydog 内置的 HttpService / SocketService（通过 BOLLYDOG_HTTP_ENABLED 环境变量启用），
+无需自定义 FastAPI——bollydog 的 HttpHandler/SseHandler 自动将 router_mapping 映射为 HTTP 端点。
+
 ```python
-# http.py
-from fastapi import FastAPI, WebSocket
-from starlette.websockets import WebSocketDisconnect
-
-app = FastAPI()
-
-@app.post("/chat")
-async def chat(request: ChatRequest):
-    """非流式聊天端点。"""
-    cmd = AgentCommand(service=agent_svc, user_message=request.message)
-    result = await hub.execute(cmd)
-    return {"response": result.state.result()}
-
-@app.websocket("/ws")
-async def websocket_chat(ws: WebSocket):
-    """WebSocket 流式聊天。"""
-    await ws.accept()
-    while True:
-        try:
-            data = await ws.receive_json()
-            cmd = AgentCommand(service=agent_svc, user_message=data['message'])
-            async for chunk in hub.execute(cmd):
-                await ws.send_json(chunk)
-        except WebSocketDisconnect:
-            break
+# http.py — 仅在需要自定义端点时使用，通常直接用 bollydog entrypoint
+# AgentService 的 router_mapping 已声明 Chat 命令的 SSE 路由
+# 启动方式：BOLLYDOG_HTTP_ENABLED=1 python -m a2.cli service --config agent.toml
 ```
+
+```toml
+# agent.toml 中的 router_mapping
+["a2.AgentService".router_mapping]
+Chat = ["SSE", "/api/chat"]
+ClearSession = ["POST", "/api/clear"]
+```
+
+bollydog 的 SseHandler 检测 async generator → 自动走 SSE 流式输出。
+普通 POST → HttpHandler → 等待 result → JSONResponse。
 
 ## Files to Create
 
@@ -339,7 +333,6 @@ async def websocket_chat(ws: WebSocket):
 
 ## Dependencies
 
-- `toml` 用于配置解析
-- `click` 用于 CLI
-- `fastapi` + `uvicorn` 用于 HTTP（可选）
-- `websockets` 用于 WS（可选）
+- `bollydog` — 核心框架（含 tomllib 配置解析、fire CLI、Starlette HTTP/WS）
+- `fire` — CLI（bollydog 已带依赖）
+- 不需要额外安装 click/fastapi——复用 bollydog 内置的 entrypoint 层

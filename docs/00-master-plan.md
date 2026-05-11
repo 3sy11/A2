@@ -434,12 +434,13 @@ bollydog **零修改**。TerminalProtocol 及其 backend 实现放在 A2 的 `to
 
 | 机制 | 复用方式 |
 |------|---------|
-| `BaseCommand.__init_subclass__` | Tool 继承 BaseCommand，自动注册到 MessageRegistry |
+| `BaseCommand.__init_subclass__` | Tool 用 `abstract=True` 阻止自动注册，具体 Tool 不在 `__dict__` 放 `__call__` |
 | `BaseCommand.__call__` | Tool 重定义 `__call__` 为直接可调用（不经过 dispatch） |
 | `BaseCommand.is_async_gen` | 自动检测 `__call__` 是否为 async generator |
 | `AppService.create_from` | 已支持 config（bollydog 侧额外支持） |
+| `AppService._apps` | Command 内跨域访问其他服务（见 doc 10） |
 | Hub `_execute` | before → runner → after 流程 |
-| Hub `_run_gen` `else` 分支 | Agent yield dict 已能正确处理 |
+| Hub `_run_gen` + `gen.asend` | 双向通信——yield SubCommand 的返回值就是 sub 的执行结果 |
 | Exchange topic 匹配 | Agent 事件发布（如 SubagentEvent） |
 | Session KV + CompositeProtocol | L4 SessionArchive（内存缓存 + 文件持久化） |
 | FileProtocol | L3 TaskSkills（技能以 .md 文件存储） |
@@ -449,6 +450,8 @@ bollydog **零修改**。TerminalProtocol 及其 backend 实现放在 A2 的 `to
 | `smart_import()` | MCPService 从 TOML config 动态加载 Protocol 子类 |
 | `AppService._load_commands` | 动态导入 agent 命令模块 |
 | `AppService.resolve_app` | 基于 destination 的路由 |
+| Entrypoint (fire CLI / Starlette) | CLI 和 HTTP 入口复用 bollydog 内置层，不需 click/fastapi |
+| `globals.app / protocol / session` | 请求作用域内访问当前服务和存储 |
 
 ---
 
@@ -715,36 +718,44 @@ bollydog 核心代码零修改。TerminalProtocol 放在 A2 的 `tools/protocol.
 
 ## 九、设计审查 — 矛盾与问题清单
 
-基于全部设计文档的交叉审查，按严重程度分类。
+基于全部设计文档的交叉审查 + 外部审计，按严重程度分类。
 
-### CRITICAL（运行时崩溃）
+### CRITICAL（已修复）
 
-| # | 问题 | 位置 | 说明 |
-|---|------|------|------|
-| C1 | SubagentTool 引用不存在的 `self._subagent_service` | 02-tool-system.md | Tool 基类只有 `self._service`（ToolService），运行时 AttributeError |
-| C2 | SkillService 调用 `self._llm.chat()` 但 `depends = []` | 04-skill-system.md | `self._llm` 不会被框架注入，运行时 AttributeError |
+| # | 问题 | 修复 |
+|---|------|------|
+| C1 | SubagentTool 引用不存在的 `self._subagent_service` | ✅ 改为 hub.execute(SpawnSubagentCommand)，见 doc 02/15 |
+| C2 | SkillService 调用 `self._llm.chat()` 但 `depends = []` | ✅ 结晶流程 Command 化，_extract_skill_pattern 改为 raise NotImplementedError 提示用 Command 路径，见 doc 04/15 |
+| C3 | `app.resolve('key')` 是虚构 API | ✅ 全部替换为 `AppService._apps['key']`，新增 doc 10 建立约定 |
+| C4 | _run_gen 伪代码描述不准确 | ✅ doc 01 已更新为展示 gen.asend(feedback) 实际语义 |
+| C5 | depends 键名与 _apps 注册键不匹配 | ✅ 统一 domain 命名规则，新增 doc 10 §2 建立约定 |
 
-### HIGH（设计违反）
+### HIGH（已修复）
 
-| # | 问题 | 位置 | 说明 |
-|---|------|------|------|
-| H1 | AgentService 调用 `self._skill_service` 但 depends 中无 SkillService | 01-agent-loop.md | `build_system_prompt()` 直接调用，depends 缺失 |
-| H2 | L3 → L1 跨层通知无 depends 也无 Command | 03-layered-memory.md | "自动通知 L1InsightIndexService.add_skill()" 未声明调用机制 |
-| H3 | SubagentTool 直接调用 SubagentService | 02-tool-system.md | Tool → Service 直接调用，应通过 Command |
+| # | 问题 | 修复 |
+|---|------|------|
+| H1 | AgentCommand 通过构造函数注入 service | ✅ 改为 globals.app + AppService._apps 范式，见 doc 01/10 |
+| H2 | Command 直接穿透访问子服务 | ✅ AgentCommand 不再 self._service.planner，改用 AppService._apps |
+| H3 | L3 → L1 跨层通知无机制 | ✅ NotifyIndexUpdateCommand，见 doc 15 |
+| H4 | SubagentTool 直接调用 SubagentService | ✅ SpawnSubagentCommand，见 doc 02/15 |
 
-### MEDIUM（文档不一致）
+### MEDIUM（已修复）
 
-| # | 问题 | 位置 | 说明 |
-|---|------|------|------|
-| M1 | PlannerService 配置字段名不匹配 | 07 vs 11 | 代码：`use_planning`/`use_reflexion`；TOML：`default_strategy`/`task_dag_path` |
-| M2 | SubagentService depends 不一致 | 08 vs DAG | 架构图只写 LLMService；代码写 LLMService + ToolService |
+| # | 问题 | 修复 |
+|---|------|------|
+| M1 | PlannerService 配置字段名不匹配 | ✅ doc 07/11 统一为 use_planning/use_reflexion |
+| M2 | SubagentService depends 不一致 | ✅ doc 08 已统一为 LLMService + ToolService |
+| M3 | pyproject.toml 无 bollydog 依赖 | ✅ 已添加 bollydog>=0.1.0 |
+| M4 | Tool.cast_params/validate_params 未定义 | ✅ doc 02 已在 Tool 基类中补充定义 |
+| M5 | CLI 框架不对齐 | ✅ doc 11 改为 python-fire（与 bollydog 一致） |
 
-### LOW（模式偏差，可接受）
+### LOW（接受/记录）
 
-| # | 问题 | 位置 | 说明 |
-|---|------|------|------|
-| L1 | MCPService 手动调 `server.on_start()` | 09-mcp-integration.md | 需要动态 N 个 Protocol 实例，已文档化理由 |
-| L2 | ToolService 含 `_ask_user` 业务逻辑 | 02-tool-system.md | 门面中混入用户交互，可后续抽取 |
+| # | 问题 | 状态 |
+|---|------|------|
+| L1 | MCPService 手动调 `server.on_start()` | 接受，已文档化理由 |
+| L2 | ToolService 含 `_ask_user` 业务逻辑 | 接受，后续可抽取 |
+| L3 | AgentCommand 应设 qos=0 | ✅ doc 01/10 已标注 |
 
 ---
 
@@ -752,8 +763,8 @@ bollydog 核心代码零修改。TerminalProtocol 放在 A2 的 `tools/protocol.
 
 ### 核心原则
 
-在 bollydog 中：
-- **Command 可以通过 `app.resolve()` 访问任意 Service**（Command 运行在 Hub 上下文中）
+在 bollydog 中（见 [10-bollydog-integration-conventions.md](10-bollydog-integration-conventions.md)）：
+- **Command 通过 `AppService._apps['key']` 访问其他 Service**（Command 运行在 Hub 上下文中）
 - **Service 不应直接调用另一个 Service**（绕过 Hub 调度）
 - **当 Service A 需要调用 Service B 时**：将操作封装为 B 暴露的 Command，由调用方 yield 到 Hub
 
@@ -772,22 +783,22 @@ bollydog 核心代码零修改。TerminalProtocol 放在 A2 的 `tools/protocol.
 Hub dispatch
 └── AgentCommand
     ├── yield PlanCommand()
-    │   └── app.resolve(LLMService).chat()           ← Command 内，允许
+    │   └── AppService._apps['a2.LLMService'].chat()  ← Command 内
     │
     └── yield ReActStepCommand(task)
-        ├── app.resolve(LLMService).chat()            ← Command 内，允许
-        ├── app.resolve(ToolService).execute()         ← Command 内，允许
+        ├── AppService._apps['a2.LLMService'].chat()   ← Command 内
+        ├── AppService._apps['a2.ToolService'].execute()
         │   └── SubagentTool.execute()
-        │       └── yield SpawnSubagentCommand()       ← Hub 调度
-        │           └── SubagentService.spawn()        ← depends 调用
+        │       └── hub.execute(SpawnSubagentCommand)   ← Hub 调度
+        │           └── SubagentService.spawn()         ← depends 调用
         │
         └── (任务成功后)
-            └── yield CrystallizeSkillCommand()        ← Hub 调度
-                ├── yield ExtractPatternCommand()      ← Hub 调度
-                │   └── app.resolve(LLMService).chat()
-                ├── skill_service.save_skill()
-                └── yield NotifyIndexUpdateCommand()   ← Hub 调度
-                    └── L1.add_skill()
+            └── yield CrystallizeSkillCommand()         ← Hub 调度
+                ├── yield ExtractPatternCommand()       ← Hub 调度
+                │   └── AppService._apps['a2.LLMService'].chat()
+                ├── AppService._apps['a2.SkillService'].save_skill()
+                └── yield NotifyIndexUpdateCommand()    ← Hub 调度
+                    └── AppService._apps['a2.memory.l1...'].add_skill()
 ```
 
 > 详细执行计划: [15-command-separation.md](15-command-separation.md)

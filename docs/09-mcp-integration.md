@@ -166,7 +166,7 @@ class MCPService(AppService):
 
     async def _discover_and_register(self):
         """从所有服务器发现工具，创建 MCPToolWrapper 并注册。"""
-        tool_service = await self.resolve('a2.ToolService')
+        tool_service = AppService._apps['a2.ToolService']
         for server in self._servers.values():
             try:
                 tool_defs = await server.list_tools()

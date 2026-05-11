@@ -267,31 +267,14 @@ class SkillService(AppService):
         return skill
 
     async def _extract_skill_pattern(self, task: str, trace: list[dict]) -> Skill | None:
-        """使用 LLM 从执行轨迹中提取可复用模式。"""
-        prompt = f"""分析这个成功的任务执行，提取可复用的技能模式。
-
-任务: {task}
-
-执行轨迹:
-{json.dumps(trace, indent=2)}
-
-提取:
-1. 技能名称（简短、描述性）
-2. 触发条件（何时使用此技能）
-3. 分步指令（工作流）
-4. 所需工具
-5. 成功标准
-
-输出 JSON 格式。
-"""
-        # 通过 LLMService 路由
-        # 注意：这里需要通过 Command 化的方式调用 LLMService
-        # 待 Command 分离后实现
-        response = await self._llm.chat(
-            messages=[{'role': 'user', 'content': prompt}],
-            capability='fast',
+        """使用 LLM 从执行轨迹中提取可复用模式。
+        注意：SkillService.depends=[]，不持有 LLMService 引用。
+        结晶流程由 CrystallizeSkillCommand 编排（Command 化调用），
+        不在 Service 内直接调用 LLM。见 15-command-separation.md。"""
+        raise NotImplementedError(
+            "请通过 CrystallizeSkillCommand → ExtractPatternCommand 调用，"
+            "不要在 Service 内直接调用 LLMService"
         )
-        return Skill.from_llm_response(response)
 
     async def _scan_skills_dir(self) -> list[str]:
         """扫描 .user/skills/ 目录中的 SKILL.md 文件。"""
@@ -376,7 +359,7 @@ always: false
     ├── 否 → 跳过结晶
     └── 是 → 提取模式:
               1. 收集执行轨迹（工具调用 + 结果）
-              2. LLMService.chat(capability='fast') 提取模式
+              2. yield ExtractPatternCommand → LLM 提取模式（见 15-command-separation.md）
               3. 生成 Skill 对象 (Pydantic)
               4. SkillService.register() 注册到内存
               5. SkillService.protocol.write() 持久化到 .user/skills/
