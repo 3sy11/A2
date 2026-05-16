@@ -83,35 +83,49 @@ class TaskList(BaseModel):
 
 ---
 
-## 四、Skill — 技能模型
+## 四、Skill — 技能模型（配置化 + 文件引用）
+
+Skill 是**配置化实体**，元数据存关系型 DB（可查询、可索引），长文本正文和附属资源通过文件路径引用。
 
 ```python
 class Skill(BaseModel):
-    name: str
+    name: str                                # 唯一标识，同时是文件目录名
     description: str
     tags: list[str] = []
     trigger_keywords: list[str] = []
-    always: bool = False               # 始终加载到 system prompt
-    body: str = ''                     # Markdown 正文
-    resources: dict[str, str] = {}     # 附属资源
+    always: bool = False                     # 始终加载到 system prompt
+    body_path: str = ''                      # 正文文件引用，相对于 skills_dir（如 "code-review/SKILL.md"）
+    resource_paths: dict[str, str] = {}      # 附属资源文件引用 {"readme": "code-review/README.md"}
+    script_paths: dict[str, str] = {}        # 可执行脚本引用 {"setup": "code-review/setup.sh"}
     usage_count: int = 0
     success_count: int = 0
 ```
 
-**存储**：`SkillService.protocol` → CacheLayer → FileProtocol → `.user/skills/{name}.md`
+**存储方案**：双层 — DB 索引 + 文件系统
 
-**序列化格式**：Markdown + YAML frontmatter
+| 层 | 存储位置 | 内容 | 用途 |
+|----|---------|------|------|
+| 元数据 | `skills.db` / `skills` 表 | name, description, tags, trigger_keywords, always, body_path, resource_paths, script_paths, usage_count, success_count | 检索、匹配、索引构建 |
+| 正文/资源 | `.agent/skills/{name}/` 目录 | SKILL.md（正文）、附属文档、可执行脚本 | 按需加载到 LLM 上下文 |
 
-```yaml
----
-name: code-review
-description: Perform structured code review
-tags: [code, review]
-trigger_keywords: [review, 审查, code review]
----
-# Code Review Skill
-...body...
+**Protocol**：`SkillService.protocol` → CacheLayer → SQLiteProtocol(path='.agent/skills.db', table='skills')
+
+**文件布局**：
+
 ```
+.agent/skills/
+├── code-review/
+│   ├── SKILL.md              ← body_path = "code-review/SKILL.md"
+│   ├── checklist.md          ← resource_paths = {"checklist": "code-review/checklist.md"}
+│   └── lint.sh               ← script_paths = {"lint": "code-review/lint.sh"}
+├── git-workflow/
+│   ├── SKILL.md
+│   └── hooks/
+│       └── pre-commit.sh
+└── ...
+```
+
+> **设计意图**：Skill 元数据（名称、标签、关键词）是高频查询数据，适合关系型索引；正文和脚本是低频大体积数据，适合文件系统存放。结晶时写入 DB 记录 + 创建文件目录，加载时先查 DB 匹配再按需读文件。
 
 ---
 
@@ -157,47 +171,167 @@ class ToolCommand(BaseCommand, abstract=True):
 
 ---
 
-## 七、MemoryLayer 数据（KV 模型）
+## 七、全局数据表清单
 
-所有 MemoryLayerService 统一使用 bollydog `SQLiteProtocol` 的 KV 表结构：
+所有 Memory/Config 数据统一使用 bollydog `SQLiteProtocol` 的 KV 表结构：
 
 ```sql
 CREATE TABLE IF NOT EXISTS {table_name} (
     key   TEXT PRIMARY KEY,
-    value TEXT NOT NULL,
+    value TEXT NOT NULL,         -- JSON 序列化
     updated_at REAL NOT NULL
 );
 ```
 
-| 层级 | DB 文件 | 表名 | key 含义 | value 含义 |
-|------|--------|------|---------|-----------|
-| L0 Rules | `memory.db` | `rules` | rule_id | 规则文本 |
-| L1 Insights | `memory.db` | `insights` | insight_id | insight JSON |
-| L4 Sessions | `memory.db` | `sessions` | session_id | 会话摘要 JSON |
-| L2 Facts | `facts.db` | `facts` | fact_id | fact 文本（BM25 检索） |
-| Tasks | `tasks.db` | `tasks` | run_id | TaskList JSON |
-| Roles | `roles.db` | `roles` | role_name | RoleDef JSON |
+### 全局表（进程级单例）
+
+| DB 文件 | 表名 | 所属 Service | key | value | 说明 |
+|--------|------|-------------|-----|-------|------|
+| `.agent/roles.db` | `roles` | AgentService | role_name | RoleDef JSON | 角色定义仓库 |
+| `.agent/skills.db` | `skills` | SkillService | skill_name | Skill JSON（含文件路径引用） | 技能元数据索引 |
+
+### 角色级表（per-role 隔离，路径前缀 `.agent/roles/{namespace}/`）
+
+| DB 文件 | 表名 | 所属 Service | key | value | 说明 |
+|--------|------|-------------|-----|-------|------|
+| `memory.db` | `rules` | ContextService._l0 | rule_id | 规则文本 | L0 系统规则 |
+| `memory.db` | `insights` | ContextService._l1 | insight_id | insight JSON | L1 技能洞察索引 |
+| `memory.db` | `sessions` | ContextService._l4 | session_id | 会话摘要 JSON | L4 会话归档 |
+| `facts.db` | `facts` | ContextService._facts | fact_id | fact 文本 | L2 全局事实（+BM25） |
+| `tasks.db` | `tasks` | PlannerService | run_id | TaskList JSON | 任务计划持久化 |
 
 ---
 
-## 八、存储物理布局
+## 八、ER 图 — 表间关系与模块归属
+
+```mermaid
+erDiagram
+    %% ═══════════════════════════════════════════════════
+    %% 全局表（进程级单例）
+    %% ═══════════════════════════════════════════════════
+
+    ROLES {
+        text key PK "role_name"
+        text value    "RoleDef JSON"
+        real updated_at
+    }
+
+    SKILLS {
+        text key PK "skill_name"
+        text value    "Skill JSON (含 body_path, resource_paths, script_paths)"
+        real updated_at
+    }
+
+    %% ═══════════════════════════════════════════════════
+    %% 角色级表（per-role 物理隔离）
+    %% 路径: .agent/roles/{namespace}/
+    %% ═══════════════════════════════════════════════════
+
+    RULES {
+        text key PK "rule_id"
+        text value    "规则文本"
+        real updated_at
+    }
+
+    INSIGHTS {
+        text key PK "insight_id"
+        text value    "insight JSON (name, description)"
+        real updated_at
+    }
+
+    SESSIONS {
+        text key PK "session_id"
+        text value    "会话摘要 JSON"
+        real updated_at
+    }
+
+    FACTS {
+        text key PK "fact_id"
+        text value    "fact 文本"
+        real updated_at
+    }
+
+    TASKS {
+        text key PK "run_id"
+        text value    "TaskList JSON"
+        real updated_at
+    }
+
+    SKILL_FILES {
+        string path "相对路径 (e.g. code-review/SKILL.md)"
+        string type "body / resource / script"
+    }
+
+    %% ═══════════════════════════════════════════════════
+    %% 逻辑关系
+    %% ═══════════════════════════════════════════════════
+
+    ROLES ||--o{ RULES : "role.base_dir → memory.db/rules"
+    ROLES ||--o{ INSIGHTS : "role.base_dir → memory.db/insights"
+    ROLES ||--o{ SESSIONS : "role.base_dir → memory.db/sessions"
+    ROLES ||--o{ FACTS : "role.base_dir → facts.db/facts"
+    ROLES ||--o{ TASKS : "role.base_dir → tasks.db/tasks"
+
+    ROLES }o--o{ SKILLS : "RoleDef.skill_refs[] → Skill.name"
+    SKILLS ||--o{ SKILL_FILES : "body_path / resource_paths / script_paths"
+    INSIGHTS }o--|| SKILLS : "L1 insight 索引 Skill 元数据"
+
+    TASKS ||--o{ SESSIONS : "TaskList.run_id 关联 session 上下文"
+```
+
+### 关系说明
+
+| 关系 | 类型 | 说明 |
+|------|------|------|
+| ROLES → RULES/INSIGHTS/SESSIONS | 1:N（物理隔离） | 每个 role 拥有独立 `memory.db`，表通过 `role.base_dir` 路径隔离 |
+| ROLES → FACTS | 1:N（物理隔离） | 每个 role 独立 `facts.db`，BM25 索引随 DB 独立 |
+| ROLES → TASKS | 1:N（物理隔离） | 每个 role 独立 `tasks.db`，PlannerService 按 `base_dir` 定位 |
+| ROLES ↔ SKILLS | M:N（逻辑引用） | `RoleDef.skill_refs[]` 引用 `Skill.name`，`'*'` 表示全部可见 |
+| SKILLS → SKILL_FILES | 1:N（文件引用） | Skill 元数据存 DB，正文/资源/脚本通过路径引用文件系统 |
+| INSIGHTS → SKILLS | N:1（逻辑映射） | L1 insight 索引条目对应 Skill 元数据，`NotifyIndexUpdateCommand` 同步 |
+| TASKS → SESSIONS | 逻辑关联 | `TaskList.run_id` 与 session `trace_id` 对应，同一执行上下文 |
+
+### 模块 × 表 归属矩阵
+
+| 模块/Service | 读 | 写 | 表 |
+|-------------|:--:|:--:|------|
+| **AgentService** | ✓ | ✓ | ROLES |
+| **SkillService** | ✓ | ✓ | SKILLS, SKILL_FILES |
+| **ContextService._l0** | ✓ | ✓ | RULES |
+| **ContextService._l1** | ✓ | ✓ | INSIGHTS |
+| **ContextService._l4** | ✓ | ✓ | SESSIONS |
+| **ContextService._facts** | ✓ | ✓ | FACTS |
+| **PlannerService** | ✓ | ✓ | TASKS |
+| **AgentCommand** | ✓ | — | ROLES（读角色定义）、SKILLS（通过 SkillService） |
+| **ReActStepCommand** | ✓ | — | FACTS（通过 build_messages）、INSIGHTS（通过 L1） |
+| **CrystallizeSkillCommand** | — | ✓ | SKILLS, SKILL_FILES, INSIGHTS |
+
+---
+
+## 九、存储物理布局
 
 ```
 .agent/
-├── roles.db                     ← AgentService.protocol
+├── roles.db                     ← AgentService.protocol (全局)
+├── skills.db                    ← SkillService.protocol (全局)
 ├── roles/
-│   ├── default/
-│   │   ├── memory.db            ← rules + insights + sessions
-│   │   ├── facts.db             ← facts + BM25
+│   ├── default/                 ← role "default" 的物理隔离目录
+│   │   ├── memory.db            ← rules + insights + sessions (同库多表)
+│   │   ├── facts.db             ← facts + BM25 索引
 │   │   ├── tasks.db             ← PlannerService 持久化
 │   │   └── outputs/             ← Artifact 产物
 │   ├── explorer/
 │   │   └── ...
 │   └── devops/
 │       └── ...
-└── skills/                      ← SkillService 全局
-    ├── code-review.md
+└── skills/                      ← Skill 文件系统 (全局共享)
+    ├── code-review/
+    │   ├── SKILL.md             ← 正文
+    │   ├── checklist.md         ← 附属资源
+    │   └── lint.sh              ← 可执行脚本
+    ├── git-workflow/
+    │   └── SKILL.md
     └── ...
 ```
 
-**隔离策略**：角色级物理隔离（独立 DB 目录），无需 namespace 前缀。跨角色分析 → v2 DuckDB ATTACH。
+**隔离策略**：角色级物理隔离（独立 DB 目录），无需 namespace 前缀。技能文件全局共享，通过 `RoleDef.skill_refs` 控制可见性。跨角色分析 → v2 DuckDB ATTACH。

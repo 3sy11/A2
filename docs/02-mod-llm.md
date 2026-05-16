@@ -50,25 +50,28 @@ class LLMService(AppService):
         return await self.protocol.count_tokens(model or self.protocol.default_model, messages)
 ```
 
-## 配置 → config.py
+## 配置 → llm/config.py
 
 ```python
-'llm.LLMService': {
-    'module': 'a2.llm.service.LLMService',
-    'protocol': {
-        'module': 'a2.llm.provider.LiteLLMProvider',
-        'default_model': 'openai/gpt-4o',
-        'models': {
-            'openai/gpt-4o':          {'model': 'openai/gpt-4o'},
-            'anthropic/claude-3.5':   {'model': 'anthropic/claude-3.5-sonnet'},
-            'deepseek/deepseek-chat': {'model': 'deepseek/deepseek-chat'},
+# a2/llm/config.py
+LLM_DEFAULT = {
+    'llm.LLMService': {
+        'module': 'a2.llm.service.LLMService',
+        'protocol': {
+            'module': 'a2.llm.provider.LiteLLMProvider',
+            'default_model': 'openai/gpt-4o',
+            'models': {
+                'openai/gpt-4o':          {'model': 'openai/gpt-4o'},
+                'anthropic/claude-3.5':   {'model': 'anthropic/claude-3.5-sonnet'},
+                'deepseek/deepseek-chat': {'model': 'deepseek/deepseek-chat'},
+            },
         },
     },
-},
+}
 ```
 
 TOML 覆盖示例：`[llm.LLMService.protocol]` 下修改 `default_model` 或追加 `models`。
 
 ## Files
 
-`llm/service.py`（LLMService）、`llm/provider.py`（LiteLLMProvider）
+`llm/config.py`（LLM_DEFAULT）、`llm/service.py`（LLMService）、`llm/provider.py`（LiteLLMProvider）

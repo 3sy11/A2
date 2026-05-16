@@ -2,28 +2,15 @@
 
 ---
 
-## 一、双层配置：config.py（默认）+ agent.toml（覆盖）
+## 一、双层配置：模块 config.py（默认）+ agent.toml（覆盖）
 
-### config.py — 全量默认配置
+### 各模块 config.py — 分布式默认配置
+
+每个模块在自己的 `config.py` 中管理默认配置。`a2/config.py` 只负责聚合和 TOML 覆盖。
 
 ```python
-# a2/config.py
-from __future__ import annotations
-import copy, os
-from pydantic import BaseModel
-
-class ServiceSpec(BaseModel):
-    key: str; module: str; db: str; table: str
-    load_on_start: bool = False; flush_threshold: int = 100
-
-ROLE_DEFAULT: list[ServiceSpec] = [
-    ServiceSpec(key='l0',    module='a2.memory.service.MemoryLayerService', db='memory.db', table='rules',    load_on_start=True),
-    ServiceSpec(key='l1',    module='a2.memory.service.MemoryLayerService', db='memory.db', table='insights'),
-    ServiceSpec(key='l4',    module='a2.memory.service.MemoryLayerService', db='memory.db', table='sessions'),
-    ServiceSpec(key='facts', module='a2.memory.facts.GlobalFactsService',   db='facts.db',  table='facts'),
-]
-
-SERVICE_DEFAULT: dict[str, dict] = {
+# a2/llm/config.py
+LLM_DEFAULT = {
     'llm.LLMService': {
         'module': 'a2.llm.service.LLMService',
         'protocol': {
@@ -36,6 +23,12 @@ SERVICE_DEFAULT: dict[str, dict] = {
             },
         },
     },
+}
+```
+
+```python
+# a2/env/config.py
+ENV_DEFAULT = {
     'env.local': {
         'module': 'a2.env.service.EnvService', 'alias': 'local',
         'commands': ['a2.env.tools'],
@@ -53,22 +46,88 @@ SERVICE_DEFAULT: dict[str, dict] = {
             },
         },
     },
+}
+```
+
+```python
+# a2/skills/config.py
+SKILLS_DEFAULT = {
     'skills.SkillService': {
         'module': 'a2.skills.service.SkillService',
         'commands': ['a2.skills.commands'],
         'depends': ['llm.LLMService'],
+        'protocol': {
+            'module': 'bollydog.adapters.composite.CacheLayer',
+            'protocol': {
+                'module': 'bollydog.adapters.memory.SQLiteProtocol',
+                'path': '.agent/skills.db', 'table': 'skills',
+            },
+        },
+        'skills_dir': '.agent/skills',
     },
+}
+```
+
+```python
+# a2/planner/config.py
+PLANNER_DEFAULT = {
     'planner.PlannerService': {
         'module': 'a2.planner.service.PlannerService',
         'depends': ['llm.LLMService'],
         'use_planning': False, 'use_reflexion': False, 'persist_tasks': True,
     },
+}
+```
+
+```python
+# a2/mcp/config.py
+MCP_DEFAULT = {
     'mcp.MCPService': {
         'module': 'a2.mcp.service.MCPService',
         'depends': ['env.local'],
         'servers': {},
     },
 }
+```
+
+```python
+# a2/context/config.py
+from pydantic import BaseModel
+
+class ServiceSpec(BaseModel):
+    key: str; module: str; db: str; table: str
+    load_on_start: bool = False; flush_threshold: int = 100
+
+ROLE_DEFAULT: list[ServiceSpec] = [
+    ServiceSpec(key='l0',    module='a2.memory.service.MemoryLayerService', db='memory.db', table='rules',    load_on_start=True),
+    ServiceSpec(key='l1',    module='a2.memory.service.MemoryLayerService', db='memory.db', table='insights'),
+    ServiceSpec(key='l4',    module='a2.memory.service.MemoryLayerService', db='memory.db', table='sessions'),
+    ServiceSpec(key='facts', module='a2.memory.facts.GlobalFactsService',   db='facts.db',  table='facts'),
+]
+
+CONTEXT_DEFAULT = {
+    'context.ContextService': {
+        'module': 'a2.context.service.ContextService',
+        'token_budget': 128000, 'compact_threshold': 13000,
+    },
+}
+```
+
+### a2/config.py — 聚合 + TOML 覆盖
+
+```python
+# a2/config.py
+from __future__ import annotations
+import copy, os
+
+from a2.llm.config import LLM_DEFAULT
+from a2.env.config import ENV_DEFAULT
+from a2.skills.config import SKILLS_DEFAULT
+from a2.planner.config import PLANNER_DEFAULT
+from a2.mcp.config import MCP_DEFAULT
+from a2.context.config import CONTEXT_DEFAULT, ROLE_DEFAULT, ServiceSpec
+
+SERVICE_DEFAULT: dict[str, dict] = {**LLM_DEFAULT, **ENV_DEFAULT, **SKILLS_DEFAULT, **PLANNER_DEFAULT, **MCP_DEFAULT, **CONTEXT_DEFAULT}
 
 def _deep_merge(base: dict, override: dict):
     for k, v in override.items():
@@ -219,15 +278,18 @@ A2/
 ├── cli.py                   # fire CLI
 ├── a2/
 │   ├── __init__.py
-│   ├── config.py            # SERVICE_DEFAULT + ROLE_DEFAULT + build_config() + load_a2_config()
+│   ├── config.py            # build_config() + load_a2_config()（聚合各模块默认 + TOML 覆盖）
 │   ├── agent/               # 顶层编排 + 角色管理  domain="agent"
+│   │   ├── config.py        #   AGENT_DEFAULT
 │   │   ├── service.py       #   AgentService（含 activate_role / 环境无关工具）
 │   │   ├── commands.py      #   AgentCommand + SpawnAgent + CreateRole + Chat + ClearSession
 │   │   └── role_def.py      #   RoleDef 模型
 │   ├── llm/                 # LLM       domain="llm"
+│   │   ├── config.py        #   LLM_DEFAULT
 │   │   ├── service.py       #   LLMService
 │   │   └── provider.py      #   LiteLLMProvider
 │   ├── env/                 # 执行环境   domain="env"（含 Tool）
+│   │   ├── config.py        #   ENV_DEFAULT
 │   │   ├── service.py       #   EnvService（拥有 ToolCommand + 权限）
 │   │   ├── tools.py         #   ToolCommand 基类 + 内置工具
 │   │   ├── protocol.py      #   TerminalProtocol + Local/Docker/SSH
@@ -237,22 +299,26 @@ A2/
 │   │   ├── facts.py         #   GlobalFactsService（BM25）
 │   │   └── commands.py      #   NotifyIndexUpdateCommand
 │   ├── skills/              # 技能       domain="skills"
+│   │   ├── config.py        #   SKILLS_DEFAULT
 │   │   ├── service.py       #   SkillService
 │   │   ├── skill.py         #   Skill 模型
 │   │   └── commands.py      #   Extract/Crystallize
 │   ├── context/             # 上下文     domain="context"（per-role 动态子类）
+│   │   ├── config.py        #   CONTEXT_DEFAULT + ROLE_DEFAULT + ServiceSpec
 │   │   └── service.py       #   ContextService（owns memory instances）
 │   ├── planner/             # 规划       domain="planner"
+│   │   ├── config.py        #   PLANNER_DEFAULT
 │   │   ├── service.py       #   PlannerService
 │   │   ├── models.py        #   Task/TaskList
 │   │   └── commands.py      #   Plan/ReAct/Reflexion
 │   └── mcp/                 # MCP        domain="mcp"
+│       ├── config.py        #   MCP_DEFAULT
 │       ├── service.py       #   MCPService
 │       └── server.py        #   MCPServerProtocol
 └── docs/
 ```
 
-**~25 文件，~2000 行**（移除 ToolService/wrapper 后精简）
+**~32 文件，~2200 行**（每个模块增加 config.py，整体更好维护）
 
 ---
 

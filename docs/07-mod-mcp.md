@@ -96,14 +96,17 @@ ReActStepCommand 聚合工具:
   其他      → env.execute_tool() 或 agent tool dispatch
 ```
 
-## 配置 → config.py
+## 配置 → mcp/config.py
 
 ```python
-'mcp.MCPService': {
-    'module': 'a2.mcp.service.MCPService',
-    'depends': ['env.local'],
-    'servers': {},
-},
+# a2/mcp/config.py
+MCP_DEFAULT = {
+    'mcp.MCPService': {
+        'module': 'a2.mcp.service.MCPService',
+        'depends': ['env.local'],
+        'servers': {},
+    },
+}
 ```
 
 MCP servers 在 `agent.toml` 中按需追加：
@@ -117,4 +120,4 @@ env = { GITHUB_TOKEN = "${GITHUB_TOKEN}" }
 
 ## Files
 
-`mcp/service.py`、`mcp/server.py`（MCPServerProtocol）
+`mcp/config.py`（MCP_DEFAULT）、`mcp/service.py`、`mcp/server.py`（MCPServerProtocol）

@@ -1,6 +1,6 @@
 # 模块：SkillService
 
-> domain=`skills` | 单一实例 | Protocol: CacheLayer → FileProtocol
+> domain=`skills` | 单一实例 | Protocol: CacheLayer → SQLiteProtocol（skills 表）+ 文件系统
 
 ---
 
@@ -8,32 +8,31 @@
 
 ```
 SkillService(AppService), domain="skills", depends=["llm.LLMService"]
-├── protocol: CacheLayer → FileProtocol
-├── _skills: dict[str, Skill]
+├── protocol: CacheLayer → SQLiteProtocol(path='.agent/skills.db', table='skills')
+├── skills_dir: str = '.agent/skills'     ← 文件系统根目录
+├── _skills: dict[str, Skill]             ← 内存缓存
 ├── get_metadata_prompt() → Level 1 索引
 ├── get_always_skills_prompt() → 始终加载
-├── load_skill(name) → Level 2 正文
-├── get_matching(query) → 关键词匹配
-└── save_skill(skill) → 持久化
+├── load_skill(name) → Level 2 正文（从文件读取）
+├── get_matching(query) → 关键词匹配（从 DB 查询）
+└── save_skill(skill) → DB 写元数据 + 文件写正文
 ```
 
-## Skill 模型
+## Skill 模型（配置化 + 文件引用）
+
+Skill 元数据存 DB（高频查询），正文和资源通过文件路径引用（低频大体积）。
 
 ```python
 class Skill(BaseModel):
     name: str; description: str; tags: list[str] = []
     trigger_keywords: list[str] = []; always: bool = False
-    body: str = ''; resources: dict[str, str] = {}
+    body_path: str = ''                       # 相对于 skills_dir 的正文文件路径
+    resource_paths: dict[str, str] = {}       # 附属资源文件引用
+    script_paths: dict[str, str] = {}         # 可执行脚本引用
     usage_count: int = 0; success_count: int = 0
-
-    def to_markdown(self) -> str:
-        frontmatter = yaml.dump({'name': self.name, 'description': self.description,
-                                  'tags': self.tags, 'trigger_keywords': self.trigger_keywords})
-        return f"---\n{frontmatter}---\n\n{self.body}"
-
-    @classmethod
-    def from_markdown(cls, content: str) -> 'Skill': ...
 ```
+
+详见 [01-data-models.md](01-data-models.md) §四。
 
 ## 三级渐进式披露
 
@@ -77,16 +76,32 @@ def get_matching(self, query: str, skill_refs: list[str] = None) -> list[Skill]:
     return [s for s in candidates if any(kw in query.lower() for kw in s.trigger_keywords)]
 ```
 
-## 配置 → config.py
+## 配置 → skills/config.py
 
 ```python
-'skills.SkillService': {
+# a2/skills/config.py
+SKILLS_DEFAULT = {
     'module': 'a2.skills.service.SkillService',
     'commands': ['a2.skills.commands'],
     'depends': ['llm.LLMService'],
-},
+    'protocol': {
+        'module': 'bollydog.adapters.composite.CacheLayer',
+        'protocol': {
+            'module': 'bollydog.adapters.memory.SQLiteProtocol',
+            'path': '.agent/skills.db',
+            'table': 'skills',
+        },
+    },
+    'skills_dir': '.agent/skills',
+}
+```
+
+TOML 覆盖示例：
+```toml
+[skills.SkillService]
+skills_dir = "/shared/team-skills"
 ```
 
 ## Files
 
-`skills/service.py`、`skills/skill.py`、`skills/commands.py`（ExtractPattern + Crystallize）
+`skills/service.py`、`skills/skill.py`、`skills/commands.py`（ExtractPattern + Crystallize）、`skills/config.py`

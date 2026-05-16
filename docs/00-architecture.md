@@ -93,7 +93,7 @@ AgentService  domain=agent
 │       ├── adapter: LocalTerminal      ← 命令执行 (或 Docker/SSH adapter)
 │       └── protocol: PermissionProtocol ← 权限校验 + 数据模型
 ├── skills.SkillService                 ← 全局 Hub + 结晶
-│   └── protocol: CacheLayer → FileProtocol
+│   └── protocol: CacheLayer → SQLiteProtocol(skills) + 文件系统引用
 ├── planner.PlannerService              ← depends: [llm.LLMService]
 ├── mcp.MCPService                      ← 官方 mcp SDK, depends: [env.local]
 │
@@ -112,7 +112,7 @@ AgentService  domain=agent
 | `AgentService` | 顶层编排 + 角色管理 | 1 | CacheLayer → SQLiteProtocol |
 | `LLMService` | Router 管多模型 | 1 | LiteLLMProvider |
 | `EnvService` | 执行环境 + 拥有 ToolCommand + 权限 | 1（默认 local，可替换） | TerminalProtocol → PermissionProtocol |
-| `SkillService` | 全局 Hub + 三级披露 + 结晶 | 1 | CacheLayer → FileProtocol |
+| `SkillService` | 全局 Hub + 三级披露 + 结晶 | 1 | CacheLayer → SQLiteProtocol + FileSystem |
 | `PlannerService` | 规划决策 | 1 | — |
 | `MCPService` | MCP 生命周期管理 | 1 | — |
 | `ContextService` | **per-role 动态子类**，上下文组装 + 压缩 + owns memory | N | — |
@@ -176,18 +176,18 @@ tools = _filter_by_model(tools, role_def.model)     # 模型兼容性过滤
 
 **优势**：角色完全物理隔离（多租户）、无需 namespace 前缀、DuckDB 可跨角色聚合分析（v2）。
 
-### 2.6 配置方案 — config.py 默认 + agent.toml 覆盖
+### 2.6 配置方案 — 模块 config.py 默认 + agent.toml 覆盖
 
 | 层级 | 来源 | 内容 | 何时生效 |
 |------|------|------|---------|
-| Python 默认 | `config.py` `SERVICE_DEFAULT` | 全局单例服务参数（LLM/Env/Skill/Planner/MCP） | `build_config()` |
-| Python 默认 | `config.py` `ROLE_DEFAULT` | 角色级 memory ServiceSpec | `activate_role()` |
+| 模块默认 | 各 `{module}/config.py` | 模块级默认参数（LLM_DEFAULT, ENV_DEFAULT 等） | `build_config()` 聚合 |
+| 角色默认 | `context/config.py` `ROLE_DEFAULT` | 角色级 memory ServiceSpec | `activate_role()` |
 | TOML 覆盖 | `agent.toml` | 各模块配置覆盖（LLM/Env/MCP 等） | `build_config()` 合并 |
 | 运行时 | `AgentService.activate_role` | 动态创建 ContextService + owned memory | `on_started()` |
 
-> 系统提示词属于角色定义（`RoleDef.system_prompt`），不作为独立配置项。
+> 系统提示词属于角色定义（`RoleDef.system_prompt`），不作为独立配置项。每个模块在自己的 `config.py` 中管理默认配置，`a2/config.py` 负责聚合所有模块默认 + TOML 覆盖 + `${VAR}` 环境变量替换。
 
-**配置流转**：`build_config(toml_overrides)` 深度合并 → `load_a2_config(merged)` → bollydog `smart_import(module).create_from(**conf)` → pop 框架字段 → **剩余字段 = `svc.config`**。
+**配置流转**：各模块 `config.py` → `build_config(toml_overrides)` 聚合+覆盖 → `load_a2_config(merged)` → bollydog `smart_import(module).create_from(**conf)` → pop 框架字段 → **剩余字段 = `svc.config`**。
 
 ### 2.7 开源替代组件
 
@@ -229,7 +229,7 @@ tools[]       工具描述（env 工具 + agent 工具 + MCP 工具，按 RoleDe
 | L0 | Meta Rules | ContextService(owns) | CacheLayer → SQLiteProtocol(rules) | 启动时全量 | ~500 |
 | L1 | Insight Index | ContextService(owns) | CacheLayer → SQLiteProtocol(insights) | 启动时元数据 | ~100/技能 |
 | L2 | Global Facts | ContextService(owns) | CacheLayer → SQLiteProtocol(facts) + bm25s | 按需检索 | ~2K |
-| L3 | Task Skills | SkillService(全局) | CacheLayer → FileProtocol | 关键词触发 | ~2K/技能 |
+| L3 | Task Skills | SkillService(全局) | CacheLayer → SQLiteProtocol + FileSystem | 关键词触发 | ~2K/技能 |
 | L4 | Session Archive | ContextService(owns) | CacheLayer → SQLiteProtocol(sessions) | 最近消息 | 可变 |
 
 ### 3.3 三层上下文压缩

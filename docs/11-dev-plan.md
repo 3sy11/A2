@@ -68,17 +68,17 @@ memory 基类（由 ContextService 动态实例化）
 
 | 模块 | 目录 | 文件数 | ~行数 | Phase |
 |------|------|--------|------|-------|
-| Config | `./` | 1 | 120 | P5 |
-| LLM | `llm/` | 2 | 100 | P1 |
-| Env | `env/` | 4 | 450 | P1 |
-| Skills | `skills/` | 3 | 250 | P1 |
-| Planner | `planner/` | 3 | 200 | P1 |
+| Config | `./` | 1 | 60 | P5 |
+| LLM | `llm/` | 3 | 120 | P1 |
+| Env | `env/` | 5 | 470 | P1 |
+| Skills | `skills/` | 4 | 280 | P1 |
+| Planner | `planner/` | 4 | 220 | P1 |
 | Memory | `memory/` | 3 | 150 | P1 |
-| MCP | `mcp/` | 2 | 150 | P2 |
-| Context | `context/` | 1 | 200 | P3 |
-| Agent | `agent/` | 3 | 400 | P4 |
+| MCP | `mcp/` | 3 | 170 | P2 |
+| Context | `context/` | 2 | 230 | P3 |
+| Agent | `agent/` | 4 | 430 | P4 |
 | Entry | `./` | 2 | 80 | P5 |
-| **合计** | | **~25** | **~2100** | |
+| **合计** | | **~32** | **~2200** | |
 
 ---
 
