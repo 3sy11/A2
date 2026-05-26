@@ -44,16 +44,23 @@ class Skill(BaseModel):
 
 ## 结晶（Command 化）
 
+结晶**不自动触发**，通过以下方式按需执行：
+- 显式调用：`CrystallizeSkillCommand` 暴露 HTTP 接口（`POST /api/skills/crystallize`）
+- 周期审计：v2 通过 `Service.timer` 定时扫描候选会话
+- 事件触发：v2 通过 Exchange 订阅 `task.completed` 事件评估
+
 ```
-任务成功 + tool_calls ≥ 3 → yield CrystallizeSkillCommand (AgentService)
+CrystallizeSkillCommand(session_id=...) ← 手动/周期/事件触发
   → yield ExtractPatternCommand → app._llm.chat(model=role_def.model)
-  → app._skill.save_skill(skill)
+  → app._skill.save_skill(skill)  ← DB 写元数据 + 文件写正文
   → yield NotifyIndexUpdateCommand → memory.l1.set()
 ```
 
+详见 [A1-open-questions.md](A1-open-questions.md) §Q7。
+
 ## 技能隔离：全局 Hub + 角色 skill_refs
 
-Skill 是全局共享资源，结晶产物写入全局 `.user/skills/`，所有角色可受益。每个角色通过 `skill_refs` 控制可见子集。
+Skill 是全局共享资源，结晶产物写入全局 `.agent/skills/`，所有角色可受益。每个角色通过 `skill_refs` 控制可见子集。
 
 ```python
 class RoleDef(BaseModel):
@@ -81,18 +88,19 @@ def get_matching(self, query: str, skill_refs: list[str] = None) -> list[Skill]:
 ```python
 # a2/skills/config.py
 SKILLS_DEFAULT = {
-    'module': 'a2.skills.service.SkillService',
-    'commands': ['a2.skills.commands'],
-    'depends': ['llm.LLMService'],
-    'protocol': {
-        'module': 'bollydog.adapters.composite.CacheLayer',
+    'skills.SkillService': {
+        'module': 'a2.skills.service.SkillService',
+        'commands': ['a2.skills.commands'],
+        'depends': ['llm.LLMService'],
         'protocol': {
-            'module': 'bollydog.adapters.memory.SQLiteProtocol',
-            'path': '.agent/skills.db',
-            'table': 'skills',
+            'module': 'bollydog.adapters.composite.CacheLayer',
+            'protocol': {
+                'module': 'bollydog.adapters.memory.SQLiteProtocol',
+                'path': '.agent/skills.db', 'table': 'skills',
+            },
         },
+        'skills_dir': '.agent/skills',
     },
-    'skills_dir': '.agent/skills',
 }
 ```
 
