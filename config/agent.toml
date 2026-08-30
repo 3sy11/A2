@@ -1,0 +1,172 @@
+# A2 Agent Framework — default configuration
+# Issue: 20260826-a2-redesign
+
+["a2.agent.service.AgentService"]
+alias = "assistant"
+commands = ["commands", "tools"]
+depends = ["context.default", "tool.toolkit", "session.store"]
+model_ref = "model.chat"
+context_ref = "context.default"
+tool_ref = "tool.toolkit"
+session_ref = "session.store"
+plan_ref = "plan.notebook"
+system_prompt = "You are a helpful AI assistant built on A2."
+tool_groups = ["basic"]
+max_iters = 20
+
+["a2.agent.service.AgentService".routers]
+Reply = ["SSE", "/api/agent/reply"]
+
+["a2.model.service.ChatModelService"]
+alias = "chat"
+commands = ["commands"]
+provider = "scripted"
+model = "gpt-4o"
+max_retries = 2
+context_size = 128000
+
+["a2.model.service.ChatModelService".protocol]
+module = "a2.protocols.impl.ScriptedChatProtocol"
+default_response = "Hello from A2."
+
+["a2.model.service.EmbeddingService"]
+alias = "embed"
+commands = ["commands"]
+model = "text-embedding-3-small"
+dimension = 16
+
+["a2.model.service.EmbeddingService".protocol]
+module = "a2.protocols.impl.HashEmbeddingProtocol"
+dimension = 16
+
+["a2.context.service.ContextService"]
+alias = "default"
+commands = ["commands"]
+budget = 128000
+trigger_ratio = 0.8
+keep_ratio = 0.3
+
+["a2.tool.service.ToolkitService"]
+alias = "toolkit"
+commands = ["commands"]
+depends = ["workspace.local", "mcp.gateway", "credential.vault"]
+always_on_groups = ["basic"]
+
+["a2.tool.service.ToolkitService".groups]
+basic = [
+    "workspace.local.ReadPath",
+    "workspace.local.ListPath",
+    "workspace.local.GlobSearch",
+    "workspace.local.GrepSearch",
+    "workspace.local.ReadArtifact",
+    "agent.assistant.AskHuman",
+    "agent.assistant.PresentFiles",
+]
+edit = ["workspace.local.WritePath", "workspace.local.EditPath"]
+exec = ["workspace.local.RunCommand", "workspace.local.RunPython"]
+mcp = []
+
+["a2.tool.service.ToolkitService".protocol]
+module = "a2.protocols.impl.RulePermissionProtocol"
+
+["a2.tool.service.ToolkitService".subscribers]
+"mcp.*.ServerConnected" = "on_server_connected"
+"mcp.*.ServerLost" = "on_server_lost"
+
+["a2.session.service.SessionService"]
+alias = "store"
+commands = ["commands"]
+
+["a2.session.service.SessionService".protocol]
+module = "bollydog.adapters.memory.MemoryProtocol"
+
+["a2.session.service.SessionService".subscribers]
+"agent.*.ReplyFinished" = "on_reply_finished"
+"agent.*.ReplyParked" = "on_reply_parked"
+
+["a2.workspace.service.WorkspaceService"]
+alias = "local"
+commands = ["commands"]
+root = ".a2/workspace"
+exec_timeout = 120
+
+["a2.workspace.service.WorkspaceService".protocol]
+module = "a2.protocols.impl.LocalSandboxProtocol"
+root = ".a2/workspace"
+
+["a2.plan.service.PlanService"]
+alias = "notebook"
+commands = ["commands"]
+
+["a2.plan.service.PlanService".protocol]
+module = "bollydog.adapters.memory.MemoryProtocol"
+
+["a2.skill.service.SkillService"]
+alias = "hub"
+commands = ["commands"]
+skill_dirs = [".a2/skills"]
+
+["a2.memory.service.MemoryService"]
+alias = "longterm"
+commands = ["commands"]
+embed_ref = "model.embed"
+
+["a2.memory.service.MemoryService".protocol]
+module = "bollydog.adapters.memory.MemoryProtocol"
+
+["a2.memory.service.MemoryService".subscribers]
+"agent.*.ReplyFinished" = "on_reply_finished"
+
+["a2.mcp.service.McpService"]
+alias = "gateway"
+commands = ["commands"]
+
+["a2.mcp.service.McpService".protocol]
+module = "bollydog.adapters.memory.MemoryProtocol"
+
+["a2.knowledge.service.KnowledgeService"]
+alias = "base"
+commands = ["commands"]
+embed_ref = "model.embed"
+chunk_size = 800
+
+["a2.knowledge.service.KnowledgeService".protocol]
+module = "a2.protocols.impl.InMemoryVectorProtocol"
+
+["a2.credential.service.CredentialService"]
+alias = "vault"
+commands = ["commands"]
+
+["a2.credential.service.CredentialService".protocol]
+module = "bollydog.adapters.memory.MemoryProtocol"
+
+["a2.team.service.TeamService"]
+alias = "room"
+commands = ["commands"]
+
+["a2.team.service.TeamService".protocol]
+module = "bollydog.adapters.memory.MemoryProtocol"
+
+["a2.observe.service.TraceService"]
+alias = "tracer"
+commands = ["commands"]
+
+["a2.observe.service.TraceService".protocol]
+module = "bollydog.adapters.memory.MemoryProtocol"
+
+["a2.observe.service.TraceService".subscribers]
+"#" = "on_any"
+
+["a2.entrypoint.http.service.HttpEntryService"]
+commands = ["commands"]
+
+["a2.entrypoint.http.service.HttpEntryService".routers]
+Chat = ["SSE", "/api/chat/stream"]
+
+["a2.entrypoint.scheduler.service.SchedulerService"]
+alias = "runner"
+commands = ["commands"]
+poll_interval = 30.0
+
+["a2.entrypoint.scheduler.service.SchedulerService".protocol]
+module = "bollydog.adapters.memory.MemoryProtocol"
