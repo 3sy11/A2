@@ -30,7 +30,13 @@ class Sequential(BaseCommand):
                 yield evt
             result = cmd.state.result()
             current_inputs = app.to_inputs([result])
-        await hub.emit(app.event('RoundCompleted', topic=self.topic, agents=self.agents, rounds=1))
+        event = app.event(
+            'RoundCompleted',
+            topic=self.topic,
+            agents=self.agents,
+            rounds=1,
+        )
+        await hub.emit(topic=type(event).destination, source=event)
 
 
 class Fanout(BaseCommand):
@@ -54,7 +60,13 @@ class Fanout(BaseCommand):
         results = yield cmds
         zipped = app.zip(self.agents, results)
         yield await chunk('fanout.completed', payload={'results': zipped})
-        await hub.emit(app.event('RoundCompleted', topic=self.topic, agents=self.agents, rounds=1))
+        event = app.event(
+            'RoundCompleted',
+            topic=self.topic,
+            agents=self.agents,
+            rounds=1,
+        )
+        await hub.emit(topic=type(event).destination, source=event)
 
 
 class Broadcast(BaseCommand):
@@ -66,15 +78,14 @@ class Broadcast(BaseCommand):
 
     async def __call__(self) -> dict:
         members = await app.members(self.topic)
-        await hub.emit(
-            app.event(
-                'MessageBroadcast',
-                topic=self.topic,
-                sender=self.sender,
-                content=self.content,
-                members=members,
-            )
+        event = app.event(
+            'MessageBroadcast',
+            topic=self.topic,
+            sender=self.sender,
+            content=self.content,
+            members=members,
         )
+        await hub.emit(topic=type(event).destination, source=event)
         return {'topic': self.topic, 'members': members}
 
 

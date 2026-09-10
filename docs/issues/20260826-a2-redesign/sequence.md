@@ -28,22 +28,20 @@
 ```
 $ a2 service --config agent.toml
   → Bootstrap.__init__(config: str)
-      → Bootstrap.config → dict                      # SERVICE_CONFIG ∪ TOML
+      → Bootstrap.config → dict                      # framework TOML ∪ app TOML
       → Bootstrap._build_services() → BollydogServices
-          → smart_import("a2.agent.service.AgentService").create_from(**conf) → AgentService
-              → AppService._build_protocol({module: CacheLayer, protocol:{module: SQLiteProtocol, path:…}}) → CacheLayer
-              → AgentService.add_dependency(CacheLayer) → CacheLayer      # self.protocol = CacheLayer
-          → …（14 类服务逐段实例化，key = f'{domain}.{alias}'）
-          → 二次遍历：depends: list[str] → dict[str, AppService]
+          → Phase 1：按 TOML key `domain.alias` 实例化所有 Service/Protocol
+              → smart_import(entry.module).create_from(**conf)
+              → 其余 TOML 参数由 BaseService.create_from 直接 setattr
+          → Phase 2：解析 protocol / depends 字符串引用
               → AgentService.add_dependency(services['context.default'])
-      → RegistryService.register() → None
-          → _register_commands('agent.assistant', svc) → None
-              # 扫描 a2.agent.commands，每个有 __call__ 的 BaseCommand 子类
-              # 生成绑定子类 destination='agent.assistant.Reply' 写入 registry.commands
-          → _register_subscribers('session.store', svc) → None
-              # subscribers={'agent.*.ReplyFinished': 'on_reply_finished'}
-              # 生成 handler Command destination='session.store.on_reply_finished'
-              # registry.subscribers['agent.*.ReplyFinished'] ∋ 该 destination
+              → ChatModelService.add_dependency(services['adapters.scripted_chat'])
+          → 扫描各 AppService.commands 模块
+              → Command → registry.add_command(destination, cls)
+              → Event → exchange.add_event(destination, cls)
+          → 解析 subscribe
+              # subscribe={'agent.*.ReplyFinished': 'OnReplyFinished'}
+              → exchange.add_event(topic, exchange.resolve('session.store.OnReplyFinished'))
       → _services_ctx_stack / _registry_ctx_stack / _session_ctx_stack / _hub_ctx_stack 压栈
   → Bootstrap.on_started()
       → for svc in services.values(): svc.maybe_start()
@@ -54,12 +52,12 @@ $ a2 service --config agent.toml
               → McpProtocol.list_tools() → list[dict]
               → McpService.register_tools(server: str, tools: list[dict]) → int
                   → type(f'mcp__{server}__{name}', (BaseCommand,), {...}) → type
-                  → registry.commands[f'mcp.gateway.mcp__{server}__{name}'] = cls
-              → hub.emit(R('mcp.gateway.ServerConnected')(server=…, tool_count=…))
+                  → registry.add_command(f'mcp.gateway.mcp__{server}__{name}', cls)
+              → hub.emit(topic='mcp.gateway.ServerConnected', source=event)
           → ToolkitService.on_started() → None
               → ToolkitService.reindex() → int                    # 工具名 ↔ destination
           → HttpService.on_start() → None
-              → 遍历 registry.commands × 各服务 routers → add_route
+              → 遍历 registry.all_commands() × 各服务 routers → add_route
                 # 'Reply': ['SSE','/api/agent/{agent}/reply'] 且 Reply 是 async gen → SseHandler
 ```
 
@@ -79,7 +77,7 @@ POST /api/agent/assistant/reply  {"session_id":"s1","inputs":[{"role":"user","co
 Reply.__call__() → AsyncGenerator[dict]
   ├→ S.set(f'turn:{session_id}', {'turn_id':…, 'iter':0, 'interrupted':False}) → None
   ├→ yield {'type':'reply.started','agent':'assistant','turn_id':…}
-  ├→ hub.emit(R('agent.assistant.ReplyStarted')(session_id:str, turn_id:str, agent:str)) → None
+  ├→ hub.emit(topic='agent.assistant.ReplyStarted', source=ReplyStarted(...)) → list[BaseEvent]
   │
   ├→ ctx = yield R('context.default.Assemble')(
   │        session_id:str, agent:str, inputs:list, system_prompt:str,
@@ -94,7 +92,7 @@ Reply.__call__() → AsyncGenerator[dict]
   ├→ tools = yield R('tool.toolkit.ListTools')(session_id:str, agent:str) → list[dict]
   │     └→ ListTools.__call__() → list
   │          ├→ protocol.get(f'groups:{session_id}') → list[str]
-  │          └→ app.schemas(groups: list) → list[dict]   # registry.commands 过滤 + model_json_schema()
+  │          └→ app.schemas(groups: list) → list[dict]   # registry.all_commands() + BaseCommand.describe()
   │
   ├── 推理（流式中继）───────────────────────────────────────────
   │   gen = R('model.chat.Generate')(messages:list, tools:list, tool_choice:str, stream:bool)
@@ -109,19 +107,19 @@ Reply.__call__() → AsyncGenerator[dict]
   │     ├→ async for delta in protocol.stream(payload: dict) → AsyncIterator[dict]
   │     │     yield {'type':'model.delta','block':'text','text':…}
   │     ├→ app.merge_deltas(deltas: list) → dict
-  │     ├→ hub.emit(R('model.chat.ModelCalled')(model:str, usage:dict, latency_ms:int, finish_reason:str))
+  │     ├→ hub.emit(topic='model.chat.ModelCalled', source=ModelCalled(...))
   │     └→ yield {'type':'model.completed','content':list,'usage':dict,'finish_reason':'stop'}
   │
   ├→ app.next_action(completed: dict, iter: int) → str          # 'exit'（无 tool_call）
   ├→ yield R('context.default.AppendContext')(session_id:str, messages:list) → int
   ├→ yield {'type':'reply.finished','finish_reason':'stop','content':[…]}
-  └→ hub.emit(R('agent.assistant.ReplyFinished')(
+  └→ hub.emit(topic='agent.assistant.ReplyFinished', source=ReplyFinished(
          session_id:str, turn_id:str, agent:str, content:list,
          usage:dict, finish_reason:str, events:list)) → None
 
 Exchange.bind_subscriber_callbacks(ReplyFinished)         # dispatch 时已绑定
   → ReplyFinished.state 完成 → _on_subscriber_done(dest, evt, state)
-      → hub.dispatch(R('session.store.on_reply_finished')())     # _source = ReplyFinished
+      → hub.dispatch(OnReplyFinished(data={'events': [ReplyFinished.model_dump()]}))
           → SessionService.on_reply_finished(message: BaseCommand) → dict
               → protocol.set(f'turn:{session_id}:{turn_id}', {...}) → None
       → hub.dispatch(R('observe.tracer.on_any')())
@@ -166,7 +164,7 @@ Exchange.bind_subscriber_callbacks(ReplyFinished)         # dispatch 时已绑�
   │     ├→ raw = inner.state.result()
   │     ├→ payload, spilled = app.truncate(raw: dict) → tuple
   │     │     └→ 超阈值时 yield R('workspace.local.StoreArtifact')(...) → str  # 见图 10
-  │     ├→ hub.emit(R('tool.toolkit.ToolInvoked')(tool:str, call_id:str, ok:bool, ms:int))
+  │     ├→ hub.emit(topic='tool.toolkit.ToolInvoked', source=ToolInvoked(...))
   │     └→ yield {'type':'tool.result','id':call_id,'status':'ok','output':payload,'artifact':spilled}
   │
   │   ReadPath.__call__() → dict            # workspace.local 域
@@ -180,7 +178,7 @@ Exchange.bind_subscriber_callbacks(ReplyFinished)         # dispatch 时已绑�
   ├── decision == 'ask' ───────────────────────────────────────  # S06 → 图 4
   │
   ├→ yield R('context.default.AppendContext')(session_id:str, messages:list) → int
-  ├→ hub.emit(R('agent.assistant.IterationCompleted')(session_id:str, turn_id:str, iter:int))
+  ├→ hub.emit(topic='agent.assistant.IterationCompleted', source=IterationCompleted(...))
   └→ iter += 1 → 回到推理段
 ```
 
@@ -230,7 +228,7 @@ Exchange.bind_subscriber_callbacks(ReplyFinished)         # dispatch 时已绑�
   │          ├→ protocol.set(f'park:{session_id}', pending) → None
   │          └→ return park_id
   ├→ yield {'type':'require_user_confirm','park_id':…,'tool':…,'args':…,'reason':…}
-  ├→ hub.emit(R('agent.assistant.ReplyParked')(session_id:str, turn_id:str, park_id:str, kind:str))
+  ├→ hub.emit(topic='agent.assistant.ReplyParked', source=ReplyParked(...))
   └→ return                                   # 生成器结束 → state.put(None) → SSE 关闭
 ```
 
@@ -272,7 +270,9 @@ Interrupt.__call__() → dict
 # 生效路径（两条，互补）
 ① 正在跑的 Reply 在每个安全点（推理前、每个工具批之间、迭代末尾）
      → S.get(f'turn:{session_id}')['interrupted'] → True
-     → yield {'type':'reply.interrupted'} ; hub.emit(ReplyInterrupted(…)) ; return
+     → yield {'type':'reply.interrupted'}
+     → hub.emit(topic='agent.assistant.ReplyInterrupted', source=ReplyInterrupted(...))
+     → return
 ② 已在 Queue 里排队的 tool.toolkit.Invoke
      → hub.before ToolkitService._guard(message) → {'type':'tool.result','status':'interrupted'}
      → CommandRunnerMixin._execute 短路：message.state.set_result(short)，runner 不执行
@@ -298,7 +298,7 @@ Interrupt.__call__() → dict
   │          ├→ summary = app.pick_text(chunks: list) → str
   │          ├→ await S.set(f'summary:{session_id}', summary) → None
   │          ├→ await S.set(f'context:{session_id}', {'context': tail}) → None
-  │          ├→ hub.emit(R('context.default.ContextCompacted')(
+  │          ├→ hub.emit(topic='context.default.ContextCompacted', source=ContextCompacted(
   │          │        session_id:str, before_tokens:int, after_tokens:int, folded:int))
   │          └→ return {'summary':str,'before_tokens':int,'after_tokens':int,'folded':int}
   ├→ yield {'type':'context.compacted', **res}
@@ -325,7 +325,7 @@ IngestDocument.__call__() → AsyncGenerator[dict]
   │     vecs = yield R('model.embed.Embed')(texts:list, model:str) → list
   │     yield R('knowledge.base.UpsertChunks')(collection:str, items:list) → int
   │     yield {'type':'ingest.progress','done':…,'total':len(chunks)}
-  ├→ hub.emit(R('knowledge.base.DocumentIngested')(doc_id:str, chunks:int, collection:str))
+  ├→ hub.emit(topic='knowledge.base.DocumentIngested', source=DocumentIngested(...))
   └→ yield {'type':'ingest.completed','doc_id':…,'chunks':len(chunks)}
 
 UpsertChunks.__call__() → int
@@ -372,16 +372,16 @@ ConnectServer.__call__() → dict
   │                    'destination': f'mcp.gateway.mcp__{server}__{tool["name"]}',
   │                    '__call__': _make_caller(server, tool['name']),
   │                    **fields['defaults']})
-  │          registry.commands[cls.destination] = cls
-  ├→ hub.emit(R('mcp.gateway.ServerConnected')(server:str, tool_count:int, transport:str))
+  │          registry.add_command(cls.destination, cls)
+  ├→ hub.emit(topic='mcp.gateway.ServerConnected', source=ServerConnected(...))
   └→ return {'server':…, 'tool_count': n, 'tools':[…]}
 
 Exchange → ToolkitService.on_server_connected(message: BaseCommand) → dict
-  ├→ evt = message._source                                 # 原始 ServerConnected
+  ├→ evt = self.data['events'][-1]                         # 原始 ServerConnected
   └→ app.reindex() → int                                   # 刷新工具名 ↔ destination 索引
 ```
 
-**关键**：动态生成 Command 子类并写入 `registry.commands`，与 bollydog `RegistryService._register_subscribers` 为订阅方法动态造 handler Command 是**同一手法**，不是新概念。
+**关键**：动态生成 Command 子类后通过 bollydog `registry.add_command()` 注册，不维护 A2 私有注册表。
 
 ---
 
@@ -420,7 +420,7 @@ Invoke.__call__() 尾部
   │       └→ StoreArtifact.__call__() → str
   │            ├→ path = app.artifact_path(session_id: str, key: str) → str
   │            ├→ await protocol.write(path: str, content: str) → None   # FileProtocol
-  │            ├→ hub.emit(R('workspace.local.ArtifactStored')(ref:str, bytes:int, mime:str))
+  │            ├→ hub.emit(topic='workspace.local.ArtifactStored', source=ArtifactStored(...))
   │            └→ return ref                        # 'artifact://s1/tool-c1.json'
   └→ yield {'type':'tool.result','output':payload,'artifact':ref,'truncated':True}
 
@@ -449,7 +449,7 @@ Generate.__call__() → AsyncGenerator[dict]
   │             await asyncio.sleep(app.backoff(attempt) → float)
   │     若成功 → break
   ├→ 全部失败：
-  │     hub.emit(R('model.chat.ModelFailed')(model:str, error:str, attempts:int))
+  │     hub.emit(topic='model.chat.ModelFailed', source=ModelFailed(...))
   │     yield {'type':'model.failed','error':…}                # S25
   └→ Reply 收到 model.failed → yield {'type':'reply.finished','finish_reason':'model_error'}
      ； 停放现场供重试：yield R('session.store.Park')(…, kind='retry')
@@ -464,13 +464,13 @@ hub.execute(R('team.room.Broadcast')(topic:str, sender:str, content:list)) → d
 
 Broadcast.__call__() → dict
   ├→ members = app.members(topic: str) → list[str]          # ['assistant','critic','writer']
-  ├→ hub.emit(R('team.room.MessageBroadcast')(
+  ├→ hub.emit(topic='team.room.MessageBroadcast', source=MessageBroadcast(
   │        topic:str, sender:str, content:list, members:list)) → None
   └→ return {'topic':…, 'delivered': len(members) - 1}
 
 Exchange 匹配 'team.room.MessageBroadcast'
   → 每个 AgentService.on_broadcast(message: BaseCommand) → dict
-      ├→ evt = message._source
+      ├→ evt = self.data['events'][-1]
       ├→ 若 evt.sender == self.alias → return {'skipped': True}
       └→ hub.dispatch(R(f'agent.{self.alias}.Observe')(
              session_id=f'team:{evt.topic}', inputs=evt.content, sender=evt.sender))
@@ -487,7 +487,7 @@ Sequential.__call__() → AsyncGenerator[dict]
   │     await hub.dispatch(cmd)
   │     async for chunk in cmd.state: yield {'agent':name, **chunk}
   │     payload = app.to_inputs(cmd.state.result()) → list
-  └→ hub.emit(R('team.room.RoundCompleted')(topic:str, agents:list, rounds:int))
+  └→ hub.emit(topic='team.room.RoundCompleted', source=RoundCompleted(...))
 
 # 并行协作
 Fanout.__call__() → AsyncGenerator[dict]
@@ -506,7 +506,7 @@ Fanout.__call__() → AsyncGenerator[dict]
   │   CreatePlan.__call__() → dict
   │     ├→ tasks = app.normalize(self.tasks: list) → list[dict]
   │     ├→ await protocol.set(f'plan:{session_id}', {'tasks':tasks}) → None
-  │     ├→ hub.emit(R('plan.notebook.PlanCreated')(session_id:str, count:int))
+  │     ├→ hub.emit(topic='plan.notebook.PlanCreated', source=PlanCreated(...))
   │     └→ return {'plan_id':…, 'tasks': tasks, 'rendered': app.render(tasks) → str}
   │
   ├→ 后续每轮 Assemble 注入清单：
@@ -518,9 +518,9 @@ Fanout.__call__() → AsyncGenerator[dict]
   │     ├→ plan = await protocol.get(f'plan:{session_id}') → dict
   │     ├→ app.apply(plan: dict, task_id: str, state: str, note: str) → dict
   │     ├→ await protocol.set(f'plan:{session_id}', plan) → None
-  │     ├→ hub.emit(R('plan.notebook.TaskUpdated')(session_id:str, task_id:str, state:str))
+  │     ├→ hub.emit(topic='plan.notebook.TaskUpdated', source=TaskUpdated(...))
   │     ├→ 若 app.progress(plan)['pending'] == 0
-  │     │     → hub.emit(R('plan.notebook.PlanCompleted')(session_id:str))
+  │     │     → hub.emit(topic='plan.notebook.PlanCompleted', source=PlanCompleted(...))
   │     └→ return {'tasks': plan['tasks'], 'progress': app.progress(plan) → dict}
 ```
 
@@ -539,7 +539,7 @@ ActivateGroup.__call__() → dict
   ├→ active = await protocol.get(f'groups:{session_id}') → list[str]
   ├→ nxt = app.apply_groups(active: list, enable: list, disable: list) → list
   ├→ await protocol.set(f'groups:{session_id}', nxt) → None
-  ├→ hub.emit(R('tool.toolkit.GroupActivated')(session_id:str, groups:list))
+  ├→ hub.emit(topic='tool.toolkit.GroupActivated', source=GroupActivated(...))
   └→ return {'groups': nxt, 'tools': [s['name'] for s in app.schemas(nxt)],
              'instructions': app.group_instructions(nxt) → str}
 ```
@@ -579,7 +579,7 @@ SchedulerService（入口层）
     │     cmd.data = {'schedule_id': job['id'], 'user_id': job['user_id']}
     │     await hub.dispatch(cmd) → cmd
     │     await self.protocol.mark_started(job['id'], cmd.iid) → None
-    └→ hub.emit(R('schedule.runner.JobDispatched')(job_id:str, destination:str))
+    └→ hub.emit(topic='schedule.runner.JobDispatched', source=JobDispatched(...))
 ```
 
 `SchedulerService` 与 `HttpService` / `SocketService` 同为**入口**（entrypoint），因此允许主动 dispatch；业务域的 `AppService` 一律不主动 dispatch。
@@ -592,7 +592,7 @@ SchedulerService（入口层）
 # 落盘（Event 侧，不在主链路上）
 Exchange 匹配 '#'
   → TraceService.on_any(message: BaseCommand) → dict
-      ├→ evt = message._source
+      ├→ evt = self.data['events'][-1]
       ├→ span = app.to_span(evt: BaseCommand) → dict
       │     # {'trace_id','span_id','parent_span_id','name','ts','duration_ms','attrs'}
       ├→ await protocol.add(span) → None                # CRUDProtocol

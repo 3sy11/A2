@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-from typing import ClassVar
-
 from a2.kernel import A2Service
 
 
 class KnowledgeService(A2Service):
     domain = 'knowledge'
     commands = ['commands']
-    emits: ClassVar[list[str]] = ['DocumentIngested']
 
     embed_ref: str = 'model.embed'
     chunk_size: int = 800

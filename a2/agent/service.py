@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 import time
-from typing import ClassVar
 
 from a2.kernel import A2Service
 
@@ -12,16 +10,6 @@ from a2.kernel import A2Service
 class AgentService(A2Service):
     domain = 'agent'
     commands = ['commands', 'tools']
-    emits: ClassVar[list[str]] = [
-        'ReplyStarted',
-        'IterationCompleted',
-        'ReplyFinished',
-        'ReplyInterrupted',
-        'ReplyParked',
-    ]
-    subscribers: ClassVar[dict] = {
-        'team.*.MessageBroadcast': 'on_broadcast',
-    }
 
     model_ref: str = 'model.chat'
     context_ref: str = 'context.default'
@@ -96,17 +84,3 @@ class AgentService(A2Service):
             'role': role,
             'content': content,
         }
-
-    async def on_broadcast(self, message) -> dict:
-        src = self.source_of(message)
-        from bollydog.globals import session
-        ctx_key = f'context:{src.get("topic", "")}'
-        data = await session.get(ctx_key)
-        history = data.get('items', []) if isinstance(data, dict) else []
-        history.append({
-            'role': 'user',
-            'content': json.dumps(src.get('content', [])),
-            'name': src.get('sender', 'team'),
-        })
-        await session.set(ctx_key, {'items': history})
-        return {'ok': True}

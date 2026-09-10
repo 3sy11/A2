@@ -5,6 +5,27 @@
 
 ---
 
+## 0 bollydog 2026-09-10 适配状态
+
+bollydog 后续版本已上移配置注入、Event/Exchange、Command 取消和 Command
+自描述能力。A2 当前代码已完成对应迁移：
+
+| 原偏离 | 当前状态 |
+|--------|----------|
+| D-02 中断 | bollydog 支持 `hub.cancel(iid)`；A2 仍以 Session 标记表达跨子命令的“整回合中断” |
+| D-05 Event destination | Event 由 Exchange 独立注册；发布使用 `hub.emit(topic=..., source=...)` |
+| D-06 TOML 注入 | `BaseService.create_from` 原生 `setattr`，A2 不再重复注入 |
+| D-07 动态工具 | 使用 `registry.add_command()` / `registry.all_commands()` |
+| D-11 订阅来源 | 订阅行为是 `BaseEvent.__call__`，来源为 `self.data['events'][-1]` |
+| D-12 订阅失败 | Event 作为普通 Command 走 Queue 状态、日志和追踪，不再使用 A2 装饰器 |
+
+配置统一使用 `domain.alias` TOML key、显式 `module`、独立 Protocol 服务引用和
+`subscribe = { topic = "EventClassName" }`。第 3 节保留的是设计时历史分析；
+若与本节冲突，以本节和 `docs/REGISTRY.md` 为准。D-01（深层流冒泡）仍未由
+bollydog 原生覆盖，A2 继续保留 `relay_gen`。
+
+---
+
 ## 1 交集分析（Issue Protocol Step 3）
 
 `docs/REGISTRY.md` 此前不存在——本 issue 是 A2 的第一个 issue，也是初始构建。
@@ -33,7 +54,7 @@ v1 代码与文档已归档到 `legacy/a2-v1/` 与 `docs/legacy/`。v1 的失败
 
 ### v1 中值得保留的资产
 
-- 「Env 拥有 Tool、没有独立 ToolService」→ 本次演进为**工具就是 Command**，比 v1 更彻底：连 ToolCommand 注册表都不需要，`registry.commands` 就是。
+- 「Env 拥有 Tool、没有独立 ToolService」→ 本次演进为**工具就是 Command**，比 v1 更彻底：连 ToolCommand 注册表都不需要，`registry.all_commands()` 就是框架索引。
 - 三级渐进披露（技能）→ 保留，并推广到工具分组（S23）。
 - 角色物理隔离存储 → 保留为「每个 `AgentService` 实例有自己的 Protocol 链」。
 - B 系列的推导方法论（故事 → 顺序图 → 接口契约）→ 本次即按此方法论执行，并与 bollydog SOP 的 P0–P8 完全对齐。
@@ -48,7 +69,7 @@ v1 代码与文档已归档到 `legacy/a2-v1/` 与 `docs/legacy/`。v1 的失败
 
 - 工具名 ← `destination` 末段或注册别名
 - 工具描述 ← 类的 `__doc__`
-- 工具参数 JSON Schema ← `cls.model_json_schema()` 减去 `_ModelMixin` + `BaseCommand` 的基类字段
+- 工具参数 JSON Schema ← bollydog `BaseCommand.describe()`
 - 工具执行 ← `hub.dispatch` / `yield`
 - 工具流式 ← Command 写成异步生成器
 - 工具并行 ← `yield [cmd, cmd, …]`
@@ -84,24 +105,19 @@ v1 代码与文档已归档到 `legacy/a2-v1/` 与 `docs/legacy/`。v1 的失败
 
 ```python
 class A2Service(AppService, abstract=True):
-    """A2 全域服务基类。只做三件事，不引入新范式。"""
-    def __init__(self, **kwargs):
-        for k, v in kwargs.items():
-            if hasattr(type(self), k): setattr(self, k, v)   # 解决偏离 D-06
-        super().__init__(**kwargs)
+    """A2 全域服务基类，只保留引用便捷方法。"""
 
     def event(self, name: str, **fields):
-        """构造本服务的绑定事件类实例。解决偏离 D-05。"""
-        return registry.resolve(f'{self.domain}.{self.alias}.{name}')(**fields)
+        """从 Exchange 构造本服务的 Event 来源实例。"""
+        dest = f'{self.domain}.{self.alias}.{name}'
+        return services.exchange.resolve(dest)(**fields)
 
-    @staticmethod
-    def source_of(message) -> dict:
-        """订阅回调里取原始事件的字段。解决偏离 D-11。"""
-        src = getattr(message, '_source', None)
-        return src.model_dump() if src is not None else {}
+    def resolve_ref(self, service_ref: str, command: str, **fields):
+        return registry.resolve(f'{service_ref}.{command}')(**fields)
 ```
 
-这是普通的 `AppService` 子类，三个方法都只是既有 API（`registry.resolve` / `setattr` / `model_dump`）的封装，不是新概念。
+这是普通的 `AppService` 子类，只封装 bollydog 现有 Registry/Exchange 查找，
+不再承担配置注入或自定义订阅语义。
 
 ### D-F 三种子命令调用姿势，按需选择
 
@@ -211,7 +227,7 @@ final = sub.state.result()
 | agentscope 中间件类型 | A2 的落法 | 用的 bollydog 概念 |
 |---------------------|----------|------------------|
 | `on_check_permission` / 预算控制 / 中断守卫 | `hub.before` 钩子，回调内按 `message.destination` 与 `message.data['agent']` 判定作用域 | before 钩子 + 短路返回 |
-| `TracingMiddleware` / 长期记忆写入 / 会话落盘 / 指标 | `BaseEvent` + Exchange 订阅，主题里带实例 alias（`agent.researcher.ReplyFinished`），天然实例级 | Event + subscribers |
+| `TracingMiddleware` / 长期记忆写入 / 会话落盘 / 指标 | `BaseEvent` + Exchange 订阅，主题里带实例 alias（`agent.researcher.ReplyFinished`），天然实例级 | Event + `subscribe` |
 | 大结果截断 / 归档 | `hub.after` 钩子 | after 钩子 |
 | `RAGMiddleware`（static 模式）/ 系统提示改写 / 上下文压缩 | `Reply` 里显式 `yield` 的子命令，由 `AgentService` 的配置字段（`rag_mode` / `inject_runtime_state`）开关 | 子命令编排 |
 | `RAGMiddleware`（agentic 模式）/ `Mem0Middleware`（agentic） | 注册成工具分组，交给模型自己决定何时调 | 工具即 Command |
@@ -224,29 +240,20 @@ final = sub.state.result()
 
 ---
 
-### D-05 事件必须携带 destination 才能被路由（陷阱）
+### D-05 Event/Exchange 路由（已由 bollydog 上移）
 
-**事实**：
-- `Exchange.bind_subscriber_callbacks`（`service/exchange.py:57-62`）：`topic = type(message).destination; if not topic: return`。
-- `RegistryService._register_commands`（`service/registry.py:38,41`）：对 `BaseEvent` 子类，若类体里**已有** `destination` 则 `continue`（跳过登记）；若没有，则生成一个带 `destination` 的**绑定子类**放进 `registry.commands`，**原始类的 `destination` 仍然是 `None`**。
-
-**后果**：`from a2.agent.commands import ReplyFinished; await hub.emit(ReplyFinished(...))` 不会触发任何订阅者，而且**不报错**。这是最危险的静默失败。
-
-**解决方案**：约定 + 自检。
-- 约定：所有命令与事件实例一律经 `registry.resolve(destination)` 构造，封装在 `A2Service.event(name, **fields)` 和模块级 `a2.kernel.ref(dest)` 里。
-- 自检：`A2Service.on_started` 遍历本类声明的 `emits: ClassVar[list[str]]`，逐个 `registry.resolve`，缺失即抛异常，启动失败。把静默失败提前成启动失败。
-
-**代价**：多一层间接。收益是把一个隐蔽的运行期陷阱变成显式的启动期校验。
+Event 由 Bootstrap 扫描 commands 模块并注册到 Exchange。A2 发布事件时从
+`services.exchange.resolve(destination)` 构造来源实例，再调用
+`hub.emit(topic=destination, source=event)`。`subscribe` 中无法解析的 Event
+类会在 Bootstrap 阶段直接报错，不再需要 A2 的 `emits` 自检。
 
 ---
 
-### D-06 TOML 自定义参数不会自动变成实例属性
+### D-06 TOML 参数注入（已由 bollydog 上移）
 
-**事实**：`AppService.create_from`（`models/service.py:47-60`）抽走五个框架键后，把剩余 `**conf` 传给 `cls(...)`；而 `BaseService.__init__(self, **kwargs)`（`models/base.py:117-118`）直接 `super().__init__()`，**丢弃 kwargs**。`service.config = conf` 保留了原始 dict，但不设属性。
-
-**解决方案**：`A2Service.__init__` 遍历 kwargs，凡是类上已声明的同名属性就 `setattr`。这正是 bollydog spec 里「服务级自定义参数定义在 `__init__` 带默认值，TOML 只覆盖非默认值」的实现方式。
-
-**代价**：无。属于按 spec 正确使用。
+`BaseService.create_from` 会实例化服务并对剩余配置执行 `setattr`。A2 服务只需
+用类属性声明默认值，不再覆盖 `__init__`。配置键使用 `domain.alias`，每个
+条目显式声明 `module`；Protocol 也是独立服务并通过字符串引用。
 
 ---
 
@@ -254,9 +261,11 @@ final = sub.state.result()
 
 **agentscope 的做法**：`Toolkit.add_tool()` / `remove_tool()` 随时增删。
 
-**bollydog 的现状**：`RegistryService.register()` 在 `Bootstrap.__init__` 里跑一次，扫描各服务的 `commands` 模块列表。
+**bollydog 的现状**：Bootstrap 在启动时扫描 commands 模块，同时 Registry
+提供 `add_command()` 与 `all_commands()` 公开 API。
 
-**解决方案**：`registry.commands` 是普通 `dict`，运行时写入合法。为每个远端 MCP 工具用 `type()` 动态生成 `BaseCommand` 子类并显式指定 `destination`：
+**解决方案**：为每个远端 MCP 工具用 `type()` 动态生成 `BaseCommand`
+子类并显式指定 `destination`：
 
 ```python
 cls = type(f'mcp__{server}__{name}', (BaseCommand,), {
@@ -267,10 +276,10 @@ cls = type(f'mcp__{server}__{name}', (BaseCommand,), {
     '__call__': _make_caller(server, name),
     **defaults,
 })
-registry.commands[cls.destination] = cls
+registry.add_command(cls.destination, cls)
 ```
 
-**这与 bollydog 自己的做法完全一致**——`RegistryService._register_subscribers`（`service/registry.py:53-58`）就是用 `type()` 为每个订阅方法动态造 handler Command。所以这不是绕过框架，是复用框架自身的手法。
+这是 bollydog 公开的动态 Command 注册方式，A2 不直接维护 Registry 内部字典。
 
 **代价（已知限制）**：动态注册的命令不会自动获得 HTTP 路由，因为 `HttpService.on_start` 已经跑完。MCP 工具只需被模型调用，不需要 HTTP 端点，因此当前无影响。若将来要给动态命令开 HTTP 路由，需要重启或给 `HttpService` 增加路由热加载——**记为框架级待办，不在本 issue 范围**。
 
@@ -316,32 +325,26 @@ registry.commands[cls.destination] = cls
 
 ---
 
-### D-11 订阅回调拿不到强类型事件
+### D-11 订阅来源（已由 bollydog 上移）
 
-**事实**：`RegistryService._register_subscribers` 生成的 handler Command 把触发事件挂在 `self._source` 上（私有属性），回调签名统一是 `async def m(self, message) -> …`，`message` 是 handler 实例，`message._source` 才是原始事件。
-
-**解决方案**：`A2Service.source_of(message) -> dict` 统一转 dict，回调内按字典键取值。
-
-**代价**：回调内无 IDE 类型提示。类型正确性由派发侧的事件类 Pydantic 定义保证，加上订阅回调的单元测试覆盖。
+订阅行为本身是 `BaseEvent`，来源消息由 `hub.emit(..., source=message)` 写入
+`self.data['events']`。A2 Event 在 `__call__` 中读取最后一项，不再访问私有
+`_source`，也不再使用服务方法式订阅回调。
 
 ---
 
-### D-12 订阅者失败静默
+### D-12 订阅失败（已由 bollydog 上移）
 
-**事实**：`Exchange._on_subscriber_done`（`service/exchange.py:46-55`）整体包在 `try/except` 里，异常只打日志。
-
-**解决方案**：
-1. 约定订阅回调必须自己捕获异常并返回 dict（包含 `{'ok': False, 'error': …}`），不向外抛。
-2. `TraceService` 订阅 `#`，订阅回调本身产生的命令也会进 span，失败可从追踪树看出来。
-3. skeleton 里给订阅回调加统一的 `@safe_subscriber` 装饰器（普通 Python 装饰器，不是框架概念）。
-
-**代价**：仍然不会阻断主链路——但这正是 Event 的语义（"Fail independently"），符合设计意图。
+Event 是普通 Command，经 Queue、CommandRunner 和 state 执行。异常由框架记录
+并归档为失败状态；发布者不等待 Event，保持“旁路失败不阻断主链路”的语义。
+A2 不再增加 `safe_subscriber` 装饰器。
 
 ---
 
 ### D-13 多副本部署下的事件广播
 
-**事实**：`Exchange.match` 查的是 `registry.subscribers`（`service/registry.py:18`），这是**本进程**的注册表。跨进程的事件广播 bollydog 没有提供。
+**事实**：`Exchange.match` 查的是本进程的 Event topic 索引。跨进程事件广播
+bollydog 仍未提供。
 
 **影响**：多副本部署时，副本 A 上发生的 `ReplyFinished` 不会触发副本 B 上的订阅者。
 
@@ -359,20 +362,22 @@ registry.commands[cls.destination] = cls
 | 编号 | 主题 | 性质 | bollydog 内可解 |
 |------|------|------|----------------|
 | D-01 | 深层事件流冒泡 | 语义差异 | ✅ 中继模式 |
-| D-02 | 中断运行中回合 | 能力缺失 | ✅ 协作式中断 |
+| D-02 | 中断运行中回合 | 部分上移 | ✅ `hub.cancel(iid)` + A2 回合级协作中断 |
 | D-03 | 跨请求人机交互 | 生命周期不匹配 | ✅ 停放-恢复 |
 | D-04 | 实例级洋葱中间件 | **架构取向差异** | ⚠️ 三层分治替代，插件化程度低于 agentscope |
-| D-05 | 事件 destination 绑定 | 陷阱 | ✅ registry.resolve + 启动自检 |
-| D-06 | TOML 参数注入 | 用法 | ✅ `__init__` setattr |
-| D-07 | 运行时动态工具 | 能力缺失 | ✅ `type()` 造类写 registry（框架自用手法） |
+| D-05 | Event/Exchange 路由 | 已上移 | ✅ `exchange.resolve` + `hub.emit(topic, source)` |
+| D-06 | TOML 参数注入 | 已上移 | ✅ `BaseService.create_from` |
+| D-07 | 运行时动态工具 | 已上移 API | ✅ `registry.add_command()` |
 | D-08 | 定时触发 | 能力缺失 | ✅ `mode.Service.timer` + 归入入口层 |
 | D-09 | 结构化对象边界 | 硬约束 | ✅ `BaseDomain` + `model_dump` |
 | D-10 | 新增 Protocol ABC | 扩展 | ✅ 子类化 `Protocol` |
-| D-11 | 订阅回调类型 | 人机工效 | ✅ `source_of` 辅助 |
-| D-12 | 订阅者失败静默 | 语义使然 | ✅ 约定 + 追踪兜底 |
+| D-11 | 订阅来源 | 已上移 | ✅ Event `data['events']` |
+| D-12 | 订阅失败 | 已上移 | ✅ Event 走 CommandRunner 状态与日志 |
 | D-13 | 多副本事件广播 | **框架级限制** | ❌ 单进程 + 粘性路由规避 |
 
-**只有两条不是完全解决**：D-04（架构取向差异，可用但插件化弱）与 D-13（框架级限制，靠部署形态规避）。其余 11 条全部在 bollydog 既有概念内闭合。
+**仍未完全解决的两条**：D-04（架构取向差异，可用但插件化弱）与
+D-13（框架级限制，靠部署形态规避）。D-01 仍由 A2 显式中继，其余能力均在
+bollydog 现有概念内闭合。
 
 ---
 
@@ -475,30 +480,30 @@ registry.commands[cls.destination] = cls
 + command ListTraces dest=observe.tracer.ListTraces
 + command AskHuman dest=agent.{alias}.AskHuman group=basic
 + command PresentFiles dest=agent.{alias}.PresentFiles group=basic
-+ event ReplyStarted source=agent.{alias} subscribers=observe.tracer
-+ event IterationCompleted source=agent.{alias} subscribers=observe.tracer
-+ event ReplyFinished source=agent.{alias} subscribers=session.store,memory.longterm,observe.tracer
-+ event ReplyInterrupted source=agent.{alias} subscribers=session.store,observe.tracer
-+ event ReplyParked source=agent.{alias} subscribers=session.store,observe.tracer
-+ event ModelCalled source=model.{alias} subscribers=observe.tracer
-+ event ModelFailed source=model.{alias} subscribers=observe.tracer
-+ event ToolInvoked source=tool.toolkit subscribers=observe.tracer
-+ event ToolFailed source=tool.toolkit subscribers=observe.tracer
-+ event GroupActivated source=tool.toolkit subscribers=observe.tracer
-+ event ContextCompacted source=context.default subscribers=observe.tracer
-+ event ServerConnected source=mcp.gateway subscribers=tool.toolkit,observe.tracer
-+ event ServerLost source=mcp.gateway subscribers=tool.toolkit,observe.tracer
-+ event SkillActivated source=skill.hub subscribers=observe.tracer
-+ event SkillCatalogChanged source=skill.hub subscribers=observe.tracer
-+ event DocumentIngested source=knowledge.base subscribers=observe.tracer
-+ event PlanCreated source=plan.notebook subscribers=observe.tracer
-+ event TaskUpdated source=plan.notebook subscribers=observe.tracer
-+ event PlanCompleted source=plan.notebook subscribers=observe.tracer
-+ event ArtifactStored source=workspace.{alias} subscribers=observe.tracer
-+ event CredentialMissing source=credential.vault subscribers=observe.tracer
-+ event MessageBroadcast source=team.room subscribers=agent.*
-+ event RoundCompleted source=team.room subscribers=observe.tracer
-+ event JobDispatched source=schedule.runner subscribers=observe.tracer
++ event ReplyStarted source=agent.{alias} subscribe=observe.tracer.OnAny
++ event IterationCompleted source=agent.{alias} subscribe=observe.tracer.OnAny
++ event ReplyFinished source=agent.{alias} subscribe=session.store.OnReplyFinished,memory.longterm.OnReplyFinished,observe.tracer.OnAny
++ event ReplyInterrupted source=agent.{alias} subscribe=observe.tracer.OnAny
++ event ReplyParked source=agent.{alias} subscribe=session.store.OnReplyParked,observe.tracer.OnAny
++ event ModelCalled source=model.{alias} subscribe=observe.tracer.OnAny
++ event ModelFailed source=model.{alias} subscribe=observe.tracer.OnAny
++ event ToolInvoked source=tool.toolkit subscribe=observe.tracer.OnAny
++ event ToolFailed source=tool.toolkit subscribe=observe.tracer.OnAny
++ event GroupActivated source=tool.toolkit subscribe=observe.tracer.OnAny
++ event ContextCompacted source=context.default subscribe=observe.tracer.OnAny
++ event ServerConnected source=mcp.gateway subscribe=tool.toolkit.OnServerConnected,observe.tracer.OnAny
++ event ServerLost source=mcp.gateway subscribe=tool.toolkit.OnServerLost,observe.tracer.OnAny
++ event SkillActivated source=skill.hub subscribe=observe.tracer.OnAny
++ event SkillCatalogChanged source=skill.hub subscribe=observe.tracer.OnAny
++ event DocumentIngested source=knowledge.base subscribe=observe.tracer.OnAny
++ event PlanCreated source=plan.notebook subscribe=observe.tracer.OnAny
++ event TaskUpdated source=plan.notebook subscribe=observe.tracer.OnAny
++ event PlanCompleted source=plan.notebook subscribe=observe.tracer.OnAny
++ event ArtifactStored source=workspace.{alias} subscribe=observe.tracer.OnAny
++ event CredentialMissing source=credential.vault subscribe=observe.tracer.OnAny
++ event MessageBroadcast source=team.room subscribe=agent.*.OnMessageBroadcast
++ event RoundCompleted source=team.room subscribe=observe.tracer.OnAny
++ event JobDispatched source=schedule.runner subscribe=observe.tracer.OnAny
 + protocol ChatModelProtocol type=abc impls=OpenAI,Anthropic,DashScope,Gemini,Ollama,DeepSeek,LiteLLM,Scripted
 + protocol EmbeddingProtocol type=abc impls=OpenAI,DashScope,Ollama,Hash
 + protocol TTSProtocol type=abc impls=OpenAI,DashScope

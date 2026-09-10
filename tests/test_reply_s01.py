@@ -66,6 +66,30 @@ async def test_list_tools(started_services):
     tools = await execute.execute(cmd)
     names = [t['name'] for t in tools]
     assert 'ReadPath' in names
+    read_path = next(tool for tool in tools if tool['name'] == 'ReadPath')
+    assert read_path['parameters']['properties']['path']['type'] == 'string'
+
+
+@pytest.mark.asyncio
+async def test_reply_finished_subscription_event(started_services):
+    execute = started_services
+    event_cls = services.exchange.resolve('session.store.OnReplyFinished')
+    event = event_cls(data={
+        'events': [{
+            'session_id': 'event_session',
+            'turn_id': 'event_turn',
+            'inputs': [{'role': 'user', 'content': 'Hello'}],
+            'content': [{'type': 'text', 'text': 'Done'}],
+            'usage': {},
+            'finish_reason': 'stop',
+            'ms': 1,
+        }],
+    })
+    await execute.execute(event)
+
+    session_store = services['session.store']
+    turn = await session_store.protocol.get('turn:event_session:event_turn')
+    assert turn['output'][0]['text'] == 'Done'
 
 
 @pytest.mark.asyncio

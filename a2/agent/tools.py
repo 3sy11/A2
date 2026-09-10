@@ -27,16 +27,15 @@ class AskHuman(BaseCommand):
         )
         await hub.dispatch(park_cmd)
         park_id = await park_cmd.state
-        await hub.emit(
-            app.event(
-                'ReplyParked',
-                session_id=self.session_id,
-                turn_id='',
-                agent=app.alias,
-                park_id=park_id,
-                kind='question',
-            )
+        event = app.event(
+            'ReplyParked',
+            session_id=self.session_id,
+            turn_id='',
+            agent=app.alias,
+            park_id=park_id,
+            kind='question',
         )
+        await hub.emit(topic=type(event).destination, source=event)
         return {'status': 'parked', 'park_id': park_id}
 
 

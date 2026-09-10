@@ -201,7 +201,13 @@ class StoreArtifact(BaseCommand):
         with open(path, 'w', encoding='utf-8') as f:
             f.write(self.content)
         ref = app.artifact_ref(self.session_id, self.key)
-        await hub.emit(app.event('ArtifactStored', ref=ref, bytes=len(self.content.encode()), mime=self.mime))
+        event = app.event(
+            'ArtifactStored',
+            ref=ref,
+            bytes=len(self.content.encode()),
+            mime=self.mime,
+        )
+        await hub.emit(topic=type(event).destination, source=event)
         return ref
 
 

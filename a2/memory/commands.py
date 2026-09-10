@@ -5,8 +5,8 @@ from __future__ import annotations
 import time
 import uuid
 
-from bollydog.globals import app
-from bollydog.models.base import BaseCommand
+from bollydog.globals import app, hub
+from bollydog.models.base import BaseCommand, BaseEvent
 
 
 class Recall(BaseCommand):
@@ -65,3 +65,22 @@ class Forget(BaseCommand):
         key = f'memory:{self.scope}:{self.subject}:{self.entry_id}'
         await app.protocol.remove(key)
         return 1
+
+
+class OnReplyFinished(BaseEvent):
+    """Extract long-term memories from a completed agent turn."""
+
+    async def __call__(self) -> dict:
+        source = self.data.get('events', [{}])[-1]
+        facts = app.extract_facts(source)
+        for fact in facts:
+            remember = app.resolve_ref(
+                'memory.longterm',
+                'Remember',
+                scope='user',
+                subject=source.get('session_id', ''),
+                text=fact['text'],
+                kind=fact.get('kind', 'fact'),
+            )
+            await hub.dispatch(remember)
+        return {'ok': True, 'facts': len(facts)}

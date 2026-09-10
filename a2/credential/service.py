@@ -6,7 +6,6 @@ import base64
 import hashlib
 import json
 import os
-from typing import ClassVar
 
 from a2.kernel import A2Service
 
@@ -14,7 +13,6 @@ from a2.kernel import A2Service
 class CredentialService(A2Service):
     domain = 'credential'
     commands = ['commands']
-    emits: ClassVar[list[str]] = ['CredentialMissing']
 
     secret_env: str = 'A2_CREDENTIAL_KEY'
 

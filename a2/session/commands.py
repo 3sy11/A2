@@ -6,7 +6,7 @@ import time
 import uuid
 
 from bollydog.globals import app
-from bollydog.models.base import BaseCommand
+from bollydog.models.base import BaseCommand, BaseEvent
 
 
 class OpenSession(BaseCommand):
@@ -166,3 +166,30 @@ class ReplayEvents(BaseCommand):
         for seq, evt in sorted(events):
             yield evt
         yield {'type': 'replay.completed', 'payload': {'last_seq': events[-1][0] if events else self.last_seq}}
+
+
+class OnReplyFinished(BaseEvent):
+    """Persist a completed agent turn."""
+
+    async def __call__(self) -> dict:
+        source = self.data.get('events', [{}])[-1]
+        return app.resolve_ref(
+            'session.store',
+            'SaveTurn',
+            session_id=source.get('session_id', ''),
+            turn_id=source.get('turn_id', ''),
+            record={
+                'inputs': source.get('inputs', []),
+                'output': source.get('content', []),
+                'usage': source.get('usage', {}),
+                'finish_reason': source.get('finish_reason', ''),
+                'ms': source.get('ms', 0),
+            },
+        )
+
+
+class OnReplyParked(BaseEvent):
+    """Observe a parked agent turn."""
+
+    async def __call__(self) -> dict:
+        return {'ok': True}

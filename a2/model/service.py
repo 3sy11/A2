@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import ClassVar
 
 from a2.kernel import A2Service
 
@@ -20,7 +19,6 @@ _BASE_COMMAND_FIELDS = {
 class ChatModelService(A2Service):
     domain = 'model'
     commands = ['commands']
-    emits: ClassVar[list[str]] = ['ModelCalled', 'ModelFailed']
 
     provider: str = 'scripted'
     model: str = 'gpt-4o'

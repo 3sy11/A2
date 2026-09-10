@@ -1,8 +1,51 @@
 # A2 Agent Framework — default configuration
 # Issue: 20260826-a2-redesign
 
-["a2.agent.service.AgentService"]
-alias = "assistant"
+# Protocols are regular bollydog services and are referenced by domain.alias.
+["adapters.scripted_chat"]
+module = "a2.protocols.impl.ScriptedChatProtocol"
+default_response = "Hello from A2."
+
+["adapters.hash_embedding"]
+module = "a2.protocols.impl.HashEmbeddingProtocol"
+dimension = 16
+
+["adapters.permission"]
+module = "a2.protocols.impl.RulePermissionProtocol"
+
+["adapters.workspace"]
+module = "a2.protocols.impl.LocalSandboxProtocol"
+root = ".a2/workspace"
+
+["adapters.knowledge"]
+module = "a2.protocols.impl.InMemoryVectorProtocol"
+
+["adapters.session"]
+module = "bollydog.adapters.memory.MemoryProtocol"
+
+["adapters.plan"]
+module = "bollydog.adapters.memory.MemoryProtocol"
+
+["adapters.memory"]
+module = "bollydog.adapters.memory.MemoryProtocol"
+
+["adapters.mcp"]
+module = "bollydog.adapters.memory.MemoryProtocol"
+
+["adapters.credential"]
+module = "bollydog.adapters.memory.MemoryProtocol"
+
+["adapters.team"]
+module = "bollydog.adapters.memory.MemoryProtocol"
+
+["adapters.observe"]
+module = "bollydog.adapters.memory.MemoryProtocol"
+
+["adapters.schedule"]
+module = "bollydog.adapters.memory.MemoryProtocol"
+
+["agent.assistant"]
+module = "a2.agent.service.AgentService"
 commands = ["commands", "tools"]
 depends = ["context.default", "tool.toolkit", "session.store"]
 model_ref = "model.chat"
@@ -13,46 +56,43 @@ plan_ref = "plan.notebook"
 system_prompt = "You are a helpful AI assistant built on A2."
 tool_groups = ["basic"]
 max_iters = 20
+subscribe = { "team.*.MessageBroadcast" = "OnMessageBroadcast" }
 
-["a2.agent.service.AgentService".routers]
+["agent.assistant".routers]
 Reply = ["SSE", "/api/agent/reply"]
 
-["a2.model.service.ChatModelService"]
-alias = "chat"
+["model.chat"]
+module = "a2.model.service.ChatModelService"
 commands = ["commands"]
+protocol = "adapters.scripted_chat"
 provider = "scripted"
 model = "gpt-4o"
 max_retries = 2
 context_size = 128000
 
-["a2.model.service.ChatModelService".protocol]
-module = "a2.protocols.impl.ScriptedChatProtocol"
-default_response = "Hello from A2."
-
-["a2.model.service.EmbeddingService"]
-alias = "embed"
+["model.embed"]
+module = "a2.model.service.EmbeddingService"
 commands = ["commands"]
+protocol = "adapters.hash_embedding"
 model = "text-embedding-3-small"
 dimension = 16
 
-["a2.model.service.EmbeddingService".protocol]
-module = "a2.protocols.impl.HashEmbeddingProtocol"
-dimension = 16
-
-["a2.context.service.ContextService"]
-alias = "default"
+["context.default"]
+module = "a2.context.service.ContextService"
 commands = ["commands"]
 budget = 128000
 trigger_ratio = 0.8
 keep_ratio = 0.3
 
-["a2.tool.service.ToolkitService"]
-alias = "toolkit"
+["tool.toolkit"]
+module = "a2.tool.service.ToolkitService"
 commands = ["commands"]
+protocol = "adapters.permission"
 depends = ["workspace.local", "mcp.gateway", "credential.vault"]
 always_on_groups = ["basic"]
+subscribe = { "mcp.*.ServerConnected" = "OnServerConnected", "mcp.*.ServerLost" = "OnServerLost" }
 
-["a2.tool.service.ToolkitService".groups]
+["tool.toolkit".groups]
 basic = [
     "workspace.local.ReadPath",
     "workspace.local.ListPath",
@@ -66,107 +106,73 @@ edit = ["workspace.local.WritePath", "workspace.local.EditPath"]
 exec = ["workspace.local.RunCommand", "workspace.local.RunPython"]
 mcp = []
 
-["a2.tool.service.ToolkitService".protocol]
-module = "a2.protocols.impl.RulePermissionProtocol"
-
-["a2.tool.service.ToolkitService".subscribers]
-"mcp.*.ServerConnected" = "on_server_connected"
-"mcp.*.ServerLost" = "on_server_lost"
-
-["a2.session.service.SessionService"]
-alias = "store"
+["session.store"]
+module = "a2.session.service.SessionService"
 commands = ["commands"]
+protocol = "adapters.session"
+subscribe = { "agent.*.ReplyFinished" = "OnReplyFinished", "agent.*.ReplyParked" = "OnReplyParked" }
 
-["a2.session.service.SessionService".protocol]
-module = "bollydog.adapters.memory.MemoryProtocol"
-
-["a2.session.service.SessionService".subscribers]
-"agent.*.ReplyFinished" = "on_reply_finished"
-"agent.*.ReplyParked" = "on_reply_parked"
-
-["a2.workspace.service.WorkspaceService"]
-alias = "local"
+["workspace.local"]
+module = "a2.workspace.service.WorkspaceService"
 commands = ["commands"]
+protocol = "adapters.workspace"
 root = ".a2/workspace"
 exec_timeout = 120
 
-["a2.workspace.service.WorkspaceService".protocol]
-module = "a2.protocols.impl.LocalSandboxProtocol"
-root = ".a2/workspace"
-
-["a2.plan.service.PlanService"]
-alias = "notebook"
+["plan.notebook"]
+module = "a2.plan.service.PlanService"
 commands = ["commands"]
+protocol = "adapters.plan"
 
-["a2.plan.service.PlanService".protocol]
-module = "bollydog.adapters.memory.MemoryProtocol"
-
-["a2.skill.service.SkillService"]
-alias = "hub"
+["skill.hub"]
+module = "a2.skill.service.SkillService"
 commands = ["commands"]
 skill_dirs = [".a2/skills"]
 
-["a2.memory.service.MemoryService"]
-alias = "longterm"
+["memory.longterm"]
+module = "a2.memory.service.MemoryService"
 commands = ["commands"]
+protocol = "adapters.memory"
 embed_ref = "model.embed"
+subscribe = { "agent.*.ReplyFinished" = "OnReplyFinished" }
 
-["a2.memory.service.MemoryService".protocol]
-module = "bollydog.adapters.memory.MemoryProtocol"
-
-["a2.memory.service.MemoryService".subscribers]
-"agent.*.ReplyFinished" = "on_reply_finished"
-
-["a2.mcp.service.McpService"]
-alias = "gateway"
+["mcp.gateway"]
+module = "a2.mcp.service.McpService"
 commands = ["commands"]
+protocol = "adapters.mcp"
 
-["a2.mcp.service.McpService".protocol]
-module = "bollydog.adapters.memory.MemoryProtocol"
-
-["a2.knowledge.service.KnowledgeService"]
-alias = "base"
+["knowledge.base"]
+module = "a2.knowledge.service.KnowledgeService"
 commands = ["commands"]
+protocol = "adapters.knowledge"
 embed_ref = "model.embed"
 chunk_size = 800
 
-["a2.knowledge.service.KnowledgeService".protocol]
-module = "a2.protocols.impl.InMemoryVectorProtocol"
+["credential.vault"]
+module = "a2.credential.service.CredentialService"
+commands = ["commands"]
+protocol = "adapters.credential"
 
-["a2.credential.service.CredentialService"]
-alias = "vault"
+["team.room"]
+module = "a2.team.service.TeamService"
+commands = ["commands"]
+protocol = "adapters.team"
+
+["observe.tracer"]
+module = "a2.observe.service.TraceService"
+commands = ["commands"]
+protocol = "adapters.observe"
+subscribe = { "#" = "OnAny" }
+
+["entry.http"]
+module = "a2.entrypoint.http.service.HttpEntryService"
 commands = ["commands"]
 
-["a2.credential.service.CredentialService".protocol]
-module = "bollydog.adapters.memory.MemoryProtocol"
-
-["a2.team.service.TeamService"]
-alias = "room"
-commands = ["commands"]
-
-["a2.team.service.TeamService".protocol]
-module = "bollydog.adapters.memory.MemoryProtocol"
-
-["a2.observe.service.TraceService"]
-alias = "tracer"
-commands = ["commands"]
-
-["a2.observe.service.TraceService".protocol]
-module = "bollydog.adapters.memory.MemoryProtocol"
-
-["a2.observe.service.TraceService".subscribers]
-"#" = "on_any"
-
-["a2.entrypoint.http.service.HttpEntryService"]
-commands = ["commands"]
-
-["a2.entrypoint.http.service.HttpEntryService".routers]
+["entry.http".routers]
 Chat = ["SSE", "/api/chat/stream"]
 
-["a2.entrypoint.scheduler.service.SchedulerService"]
-alias = "runner"
+["schedule.runner"]
+module = "a2.entrypoint.scheduler.service.SchedulerService"
 commands = ["commands"]
+protocol = "adapters.schedule"
 poll_interval = 30.0
-
-["a2.entrypoint.scheduler.service.SchedulerService".protocol]
-module = "bollydog.adapters.memory.MemoryProtocol"

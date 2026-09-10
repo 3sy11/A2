@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import ClassVar
 
 from a2.kernel import A2Service
 
@@ -13,7 +12,6 @@ from a2.kernel import A2Service
 class SkillService(A2Service):
     domain = 'skill'
     commands = ['commands']
-    emits: ClassVar[list[str]] = ['SkillActivated', 'SkillCatalogChanged']
 
     skill_dirs: list = ['.a2/skills']
     max_body_chars: int = 40000

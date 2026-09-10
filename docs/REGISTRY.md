@@ -14,6 +14,7 @@
 | L5 | 跨副本事件不可见 | 单进程 + 会话粘性路由 + Redis 共享状态 |
 | L6 | 无通用中间件插件点 | Event 订阅 + 工具分组两个官方扩展位 |
 | L7 | 停放态需定时清扫 | SchedulerService 定时清扫（P8） |
+| L8 | 子命令流不会自动冒泡 | A2 `relay_gen` 显式中继 |
 
 ## Services
 
@@ -60,14 +61,17 @@
 
 ## Events & Subscribers
 
-| event source | subscribers |
-|--------------|-------------|
-| agent.*.ReplyFinished | session.store, memory.longterm, observe.tracer |
-| agent.*.ReplyParked | session.store, observe.tracer |
-| tool.*.ToolInvoked | observe.tracer |
-| mcp.*.ServerConnected | tool.toolkit, observe.tracer |
-| team.*.MessageBroadcast | agent.* (on_broadcast) |
-| # | observe.tracer (on_any) |
+| topic | 订阅 Event |
+|-------|------------|
+| agent.*.ReplyFinished | session.store.OnReplyFinished, memory.longterm.OnReplyFinished, observe.tracer.OnAny |
+| agent.*.ReplyParked | session.store.OnReplyParked, observe.tracer.OnAny |
+| tool.*.ToolInvoked | observe.tracer.OnAny |
+| mcp.*.ServerConnected | tool.toolkit.OnServerConnected, observe.tracer.OnAny |
+| team.*.MessageBroadcast | agent.*.OnMessageBroadcast |
+| # | observe.tracer.OnAny |
+
+订阅遵循 bollydog 当前模型：`subscribe` 将 Event 类绑定到 topic；Event 在
+`__call__` 中处理 `self.data['events'][-1]` 携带的来源消息。
 
 ## Protocol ABCs
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-from typing import ClassVar
 
 import mode
 
@@ -17,7 +16,6 @@ class SchedulerService(A2Service):
     domain = 'schedule'
     commands = ['commands']
     alias = 'runner'
-    emits: ClassVar[list[str]] = ['JobDispatched']
 
     poll_interval: float = 30.0
 
@@ -36,6 +34,11 @@ class SchedulerService(A2Service):
             if job.get('next_run', 0) <= now:
                 cmd = registry.resolve(job['destination'])(**job.get('args', {}))
                 await hub.dispatch(cmd)
-                await hub.emit(self.event('JobDispatched', job_id=job.get('id', ''), destination=job['destination']))
+                event = self.event(
+                    'JobDispatched',
+                    job_id=job.get('id', ''),
+                    destination=job['destination'],
+                )
+                await hub.emit(topic=type(event).destination, source=event)
                 job['next_run'] = now + job.get('interval', 3600)
         await self.protocol.set('jobs', jobs)

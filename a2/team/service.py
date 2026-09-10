@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-from typing import ClassVar
-
 from a2.kernel import A2Service
 
 
 class TeamService(A2Service):
     domain = 'team'
     commands = ['commands']
-    emits: ClassVar[list[str]] = ['MessageBroadcast', 'RoundCompleted']
 
     async def members(self, topic: str) -> list:
         return await self.protocol.get(f'topic:{topic}') or []

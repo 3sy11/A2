@@ -3,20 +3,13 @@
 from __future__ import annotations
 
 import time
-from typing import ClassVar
 
-from bollydog.models.base import BaseCommand
-
-from a2.kernel import A2Service, safe_subscriber
+from a2.kernel import A2Service
 
 
 class SessionService(A2Service):
     domain = 'session'
     commands = ['commands']
-    subscribers: ClassVar[dict] = {
-        'agent.*.ReplyFinished': 'on_reply_finished',
-        'agent.*.ReplyParked': 'on_reply_parked',
-    }
     event_retention: int = 2000
 
     def new_record(self, session_id: str, user_id: str, agent: str) -> dict:
@@ -63,25 +56,3 @@ class SessionService(A2Service):
             elif content:
                 return str(content)[:80]
         return 'New conversation'
-
-    @safe_subscriber
-    async def on_reply_finished(self, message: BaseCommand) -> dict:
-        src = self.source_of(message)
-        save = self.resolve_ref('session.store', 'SaveTurn', **{
-            'session_id': src.get('session_id', ''),
-            'turn_id': src.get('turn_id', ''),
-            'record': {
-                'inputs': src.get('inputs', []),
-                'output': src.get('content', []),
-                'usage': src.get('usage', {}),
-                'finish_reason': src.get('finish_reason', ''),
-                'ms': src.get('ms', 0),
-            },
-        })
-        from bollydog.globals import hub
-        await hub.dispatch(save)
-        return {'ok': True}
-
-    @safe_subscriber
-    async def on_reply_parked(self, message: BaseCommand) -> dict:
-        return {'ok': True}

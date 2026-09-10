@@ -44,15 +44,14 @@ class Generate(BaseCommand):
                         result = item.get('payload', item)
                         usage = result.get('usage', {})
                         latency = int((time.time() - start) * 1000)
-                        await hub.emit(
-                            svc.event(
-                                'ModelCalled',
-                                model=model_name,
-                                usage=usage,
-                                latency_ms=latency,
-                                finish_reason=result.get('finish_reason', 'stop'),
-                            )
+                        event = svc.event(
+                            'ModelCalled',
+                            model=model_name,
+                            usage=usage,
+                            latency_ms=latency,
+                            finish_reason=result.get('finish_reason', 'stop'),
                         )
+                        await hub.emit(topic=type(event).destination, source=event)
                         yield await chunk(
                             'model.completed',
                             payload={
@@ -69,15 +68,14 @@ class Generate(BaseCommand):
                     merged = svc.merge_deltas(deltas)
                     usage = merged.get('usage', {})
                     latency = int((time.time() - start) * 1000)
-                    await hub.emit(
-                        svc.event(
-                            'ModelCalled',
-                            model=model_name,
-                            usage=usage,
-                            latency_ms=latency,
-                            finish_reason=merged.get('finish_reason', 'stop'),
-                        )
+                    event = svc.event(
+                        'ModelCalled',
+                        model=model_name,
+                        usage=usage,
+                        latency_ms=latency,
+                        finish_reason=merged.get('finish_reason', 'stop'),
                     )
+                    await hub.emit(topic=type(event).destination, source=event)
                     yield await chunk('model.completed', payload=merged)
                     return
             except Exception as exc:
@@ -89,9 +87,13 @@ class Generate(BaseCommand):
                 if attempt < len(models) - 1:
                     await asyncio.sleep(svc.backoff(attempt))
 
-        await hub.emit(
-            svc.event('ModelFailed', model=models[0], error=last_error, attempts=len(models))
+        event = svc.event(
+            'ModelFailed',
+            model=models[0],
+            error=last_error,
+            attempts=len(models),
         )
+        await hub.emit(topic=type(event).destination, source=event)
         yield await chunk(
             'model.failed',
             payload={'error': last_error, 'attempts': len(models)},

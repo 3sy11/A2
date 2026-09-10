@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-from typing import ClassVar
-
 from a2.kernel import A2Service
 
 
 class ContextService(A2Service):
     domain = 'context'
     commands = ['commands']
-    emits: ClassVar[list[str]] = ['ContextCompacted']
 
     budget: int = 128000
     trigger_ratio: float = 0.8

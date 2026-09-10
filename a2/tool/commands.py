@@ -96,16 +96,15 @@ class Invoke(BaseCommand):
                 result if isinstance(result, dict) else {'result': result}
             )
             ms = int((time.time() - start) * 1000)
-            await hub.emit(
-                svc.event(
-                    'ToolInvoked',
-                    tool=self.tool,
-                    call_id=self.call_id,
-                    session_id=self.session_id,
-                    ok=True,
-                    ms=ms,
-                )
+            event = svc.event(
+                'ToolInvoked',
+                tool=self.tool,
+                call_id=self.call_id,
+                session_id=self.session_id,
+                ok=True,
+                ms=ms,
             )
+            await hub.emit(topic=type(event).destination, source=event)
             yield await chunk(
                 'tool.result',
                 session_id=self.session_id,
@@ -119,15 +118,14 @@ class Invoke(BaseCommand):
             )
         except Exception as exc:
             ms = int((time.time() - start) * 1000)
-            await hub.emit(
-                svc.event(
-                    'ToolFailed',
-                    tool=self.tool,
-                    call_id=self.call_id,
-                    session_id=self.session_id,
-                    error=str(exc),
-                )
+            event = svc.event(
+                'ToolFailed',
+                tool=self.tool,
+                call_id=self.call_id,
+                session_id=self.session_id,
+                error=str(exc),
             )
+            await hub.emit(topic=type(event).destination, source=event)
             yield await chunk(
                 'tool.result',
                 session_id=self.session_id,
@@ -170,9 +168,12 @@ class ActivateGroup(BaseCommand):
         active = data.get('groups', app.always_on_groups) if isinstance(data, dict) else app.always_on_groups
         new_active = app.apply_groups(active, self.enable, self.disable)
         await session.set(key, {'groups': new_active})
-        await hub.emit(
-            app.event('GroupActivated', session_id=self.session_id, groups=new_active)
+        event = app.event(
+            'GroupActivated',
+            session_id=self.session_id,
+            groups=new_active,
         )
+        await hub.emit(topic=type(event).destination, source=event)
         return {'groups': new_active}
 
 
@@ -194,6 +195,20 @@ class ToolFailed(BaseEvent):
 class GroupActivated(BaseEvent):
     session_id: str = ''
     groups: list = []
+
+
+class OnServerConnected(BaseEvent):
+    """Refresh the tool index after an MCP server connects."""
+
+    async def __call__(self) -> dict:
+        return {'ok': True, 'tools': app.reindex()}
+
+
+class OnServerLost(BaseEvent):
+    """Refresh the tool index after an MCP server disconnects."""
+
+    async def __call__(self) -> dict:
+        return {'ok': True, 'tools': app.reindex()}
 
 
 async def _park_confirm(invoke: Invoke) -> str:

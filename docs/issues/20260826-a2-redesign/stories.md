@@ -2,7 +2,7 @@
 
 > Issue: `20260826-a2-redesign`
 > 目标：在 bollydog 之上重建 A2 智能体框架，能力对齐 agentscope 开源框架，并足以支撑 dataagent2 落地。
-> 约束：**所有基础概念与范式必须是 bollydog 既有概念**（`BaseCommand` / `BaseEvent` / `BaseDomain` / `AppService` / `Protocol` / `HubService` / `Exchange` / `Session` / `Queue` / `RegistryService` / `routers` / `subscribers` / `depends` / `StreamState`）。无法映射的项记录在 `notes.md` 的「偏离与妥协」章节。
+> 约束：**所有基础概念与范式必须是 bollydog 既有概念**（`BaseCommand` / `BaseEvent` / `BaseDomain` / `AppService` / `Protocol` / `HubService` / `Exchange` / `Session` / `Queue` / `RegistryService` / `routers` / `subscribe` / `depends` / `StreamState`）。无法映射的项记录在 `notes.md` 的「偏离与妥协」章节。
 
 ---
 
@@ -334,19 +334,25 @@
 订阅声明写在 TOML：
 
 ```toml
-["a2.observe.service.TraceService".subscribers]
-"#" = "on_any"
+["observe.tracer"]
+module = "a2.observe.service.TraceService"
+commands = ["commands"]
+subscribe = { "#" = "OnAny" }
 
-["a2.session.service.SessionService".subscribers]
-"agent.*.ReplyFinished" = "on_reply_finished"
-"agent.*.ReplyParked"   = "on_reply_parked"
+["session.store"]
+module = "a2.session.service.SessionService"
+commands = ["commands"]
+subscribe = { "agent.*.ReplyFinished" = "OnReplyFinished", "agent.*.ReplyParked" = "OnReplyParked" }
 
-["a2.memory.service.MemoryService".subscribers]
-"agent.*.ReplyFinished" = "on_reply_finished"
+["memory.longterm"]
+module = "a2.memory.service.MemoryService"
+commands = ["commands"]
+subscribe = { "agent.*.ReplyFinished" = "OnReplyFinished" }
 
-["a2.tool.service.ToolkitService".subscribers]
-"mcp.*.ServerConnected" = "on_server_connected"
-"mcp.*.ServerLost"      = "on_server_lost"
+["tool.toolkit"]
+module = "a2.tool.service.ToolkitService"
+commands = ["commands"]
+subscribe = { "mcp.*.ServerConnected" = "OnServerConnected", "mcp.*.ServerLost" = "OnServerLost" }
 ```
 
 ### 2.5 检查项
@@ -423,7 +429,7 @@
 | 持有状态 | 分组定义（`{group: [destination…]}`）、常驻分组、权限规则、结果截断阈值 |
 | Protocol | `PermissionProtocol`（规则匹配 + 决策）外层包 `CacheLayer` 存每会话已激活分组 |
 | depends | `workspace.local`、`mcp.gateway`、`credential.vault` |
-| 业务方法 | `schemas(groups) -> list[dict]`（从 `registry.commands` 过滤 + Pydantic `model_json_schema()` 推导）、`resolve_tool(name) -> str`（工具名 → destination）、`decide(name, args, ctx) -> str`、`is_concurrency_safe(name) -> bool`、`truncate(result) -> tuple[dict, bool]` |
+| 业务方法 | `schemas(groups) -> list[dict]`（从 `registry.all_commands()` 过滤 + `BaseCommand.describe()` 推导）、`resolve_tool(name) -> str`（工具名 → destination）、`decide(name, args, ctx) -> str`、`is_concurrency_safe(name) -> bool`、`truncate(result) -> tuple[dict, bool]` |
 | 生命周期 | `on_started` 建立「工具名 ↔ destination」索引；订阅 MCP 事件后增量刷新 |
 | 关键点 | **工具就是 Command**。工具的入参 = Command 的字段，工具描述 = Command 的 docstring，工具 JSON Schema 由 Pydantic 自动导出。不存在独立的 Tool 抽象 |
 
@@ -432,7 +438,7 @@
 | 项 | 内容 |
 |----|------|
 | Protocol | `McpProtocol` 抽象；实现 `StdioMcpProtocol` / `HttpMcpProtocol`；测试用 `FakeMcpProtocol` |
-| 业务方法 | `register_tools(server, tools)` —— 为每个远端工具用 `type()` 动态生成一个 `BaseCommand` 子类并写入 `registry.commands`（这与 bollydog `RegistryService._register_subscribers` 动态生成 handler Command 是同一手法）；`unregister_tools(server)` |
+| 业务方法 | `register_tools(server, tools)` —— 为每个远端工具用 `type()` 动态生成一个 `BaseCommand` 子类并调用 `registry.add_command()`；`unregister_tools(server)` 通过 `registry.all_commands()` 移除对应 destination |
 | 生命周期 | `on_started` 连接 TOML 里声明的服务；`on_stop` 全部断开 |
 
 #### `SkillService`（domain=`skill`）

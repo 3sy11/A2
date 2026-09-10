@@ -24,7 +24,13 @@ class CreatePlan(BaseCommand):
             'tasks': app.normalize(self.tasks),
         }
         await app.protocol.set(f'plan:{self.session_id}', plan)
-        await hub.emit(app.event('PlanCreated', session_id=self.session_id, plan_id=plan_id, count=len(plan['tasks'])))
+        event = app.event(
+            'PlanCreated',
+            session_id=self.session_id,
+            plan_id=plan_id,
+            count=len(plan['tasks']),
+        )
+        await hub.emit(topic=type(event).destination, source=event)
         return plan
 
 
@@ -40,10 +46,21 @@ class UpdateTask(BaseCommand):
         plan = await app.protocol.get(f'plan:{self.session_id}') or {'tasks': []}
         plan = app.apply(plan, self.task_id, self.state, self.note)
         await app.protocol.set(f'plan:{self.session_id}', plan)
-        await hub.emit(app.event('TaskUpdated', session_id=self.session_id, task_id=self.task_id, state=self.state))
+        event = app.event(
+            'TaskUpdated',
+            session_id=self.session_id,
+            task_id=self.task_id,
+            state=self.state,
+        )
+        await hub.emit(topic=type(event).destination, source=event)
         progress = app.progress(plan)
         if progress['pending'] == 0 and progress['total'] > 0:
-            await hub.emit(app.event('PlanCompleted', session_id=self.session_id, plan_id=plan.get('plan_id', '')))
+            event = app.event(
+                'PlanCompleted',
+                session_id=self.session_id,
+                plan_id=plan.get('plan_id', ''),
+            )
+            await hub.emit(topic=type(event).destination, source=event)
         return plan
 
 

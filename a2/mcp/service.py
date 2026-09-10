@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import inspect
-from typing import ClassVar
 
-from bollydog.globals import registry
+from bollydog.globals import app, registry
 from bollydog.models.base import BaseCommand
 
 from a2.kernel import A2Service
@@ -14,7 +13,6 @@ from a2.kernel import A2Service
 class McpService(A2Service):
     domain = 'mcp'
     commands = ['commands']
-    emits: ClassVar[list[str]] = ['ServerConnected', 'ServerLost']
 
     servers: dict = {}
     _connected: dict = {}
@@ -47,14 +45,14 @@ class McpService(A2Service):
                     **defaults,
                 },
             )
-            registry.commands[dest] = cls
+            registry.add_command(dest, cls)
             count += 1
         return count
 
     def unregister_tools(self, server: str) -> int:
         prefix = f'mcp.gateway.mcp__{server}__'
-        to_remove = [d for d in registry.commands if d.startswith(prefix.replace('mcp.gateway.', ''))]
-        for dest in list(registry.commands):
-            if f'mcp__{server}__' in dest:
-                del registry.commands[dest]
+        commands = registry.all_commands()
+        to_remove = [dest for dest in commands if dest.startswith(prefix)]
+        for dest in to_remove:
+            commands.pop(dest)
         return len(to_remove)

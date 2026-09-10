@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import ClassVar
 
 from a2.kernel import A2Service
 
@@ -12,7 +11,6 @@ from a2.kernel import A2Service
 class WorkspaceService(A2Service):
     domain = 'workspace'
     commands = ['commands']
-    emits: ClassVar[list[str]] = ['ArtifactStored']
 
     root: str = '.a2/workspace'
     allow_commands: list = []

@@ -5,7 +5,7 @@
 ## 设计原则
 
 - **所有基础概念来自 bollydog**：Command、Event、AppService、Protocol、Hub、Exchange、Session
-- **工具就是 Command**（D-A）：无独立 Tool 抽象，`registry.commands` 即工具注册表
+- **工具就是 Command**（D-A）：无独立 Tool 抽象，使用 bollydog Registry 的 Command 索引
 - **主链路 Command，旁路 Event**（D-C）：可观测/落盘/记忆抽取走订阅
 - **偏离记录**：见 [`docs/issues/20260826-a2-redesign/notes.md`](docs/issues/20260826-a2-redesign/notes.md) §3
 

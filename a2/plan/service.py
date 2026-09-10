@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-from typing import ClassVar
-
 from a2.kernel import A2Service
 
 
 class PlanService(A2Service):
     domain = 'plan'
     commands = ['commands']
-    emits: ClassVar[list[str]] = ['PlanCreated', 'TaskUpdated', 'PlanCompleted']
 
     def normalize(self, tasks: list) -> list:
         result = []

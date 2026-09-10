@@ -40,7 +40,13 @@ class IngestDocument(BaseCommand):
                 })
             yield UpsertChunks(collection=self.collection, items=items)
             yield await chunk('ingest.progress', payload={'done': min((i + 1) * 32, total), 'total': total})
-        await hub.emit(app.event('DocumentIngested', doc_id=doc_id, chunks=total, collection=self.collection))
+        event = app.event(
+            'DocumentIngested',
+            doc_id=doc_id,
+            chunks=total,
+            collection=self.collection,
+        )
+        await hub.emit(topic=type(event).destination, source=event)
         yield await chunk('ingest.completed', payload={'doc_id': doc_id, 'chunks': total})
 
 

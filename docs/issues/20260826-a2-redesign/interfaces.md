@@ -475,7 +475,6 @@ class AgentService(A2Service):
     def build_hint(self, state: dict) -> str: ...
     def pick_final(self, chunks: list) -> list: ...
     def to_msg(self, content: list, role: str) -> dict: ...
-    async def on_broadcast(self, message: BaseCommand) -> dict: ...       # subscriber
 ```
 
 ### `ChatModelService`
@@ -559,7 +558,7 @@ class ToolkitService(A2Service):
     async def on_server_lost(self, message: BaseCommand) -> dict: ...
 ```
 
-**`schemas()` 的实现要点**：遍历 `registry.commands`，对属于激活分组的 destination，取其 Command 类，用 `cls.model_json_schema()` 减去 `_ModelMixin` + `BaseCommand` 的基类字段（`created_time/update_time/iid/sign/created_by/expire_time/delivery_count/state/trace_id/span_id/parent_span_id/data`），得到纯业务参数 schema；`description` 取 `cls.__doc__`。**工具描述完全由 Command 自描述，无需另写注册表**。
+**`schemas()` 的实现要点**：遍历 `registry.all_commands()`，对属于激活分组的 destination，取其 Command 类并调用 bollydog `BaseCommand.describe()`，得到纯业务参数 schema 与 description。**工具描述完全由 Command 自描述，无需另写注册表**。
 
 ### `McpService`
 
@@ -770,35 +769,29 @@ class PermissionProtocol(Protocol, abstract=True):
 
 ---
 
-## 6 Subscriber 签名
+## 6 Event 订阅契约
 
 ```python
-class SessionService(A2Service):
-    subscribers = {
-        'agent.*.ReplyFinished': 'on_reply_finished',
-        'agent.*.ReplyParked':   'on_reply_parked',
-    }
-    async def on_reply_finished(self, message: BaseCommand) -> dict: ...
-    async def on_reply_parked(self, message: BaseCommand) -> dict: ...
+class OnReplyFinished(BaseEvent):
+    async def __call__(self) -> BaseCommand:
+        source = self.data['events'][-1]
+        return app.resolve_ref('session.store', 'SaveTurn', ...)
 
-class MemoryService(A2Service):
-    subscribers = {'agent.*.ReplyFinished': 'on_reply_finished'}
-    async def on_reply_finished(self, message: BaseCommand) -> dict: ...
+class OnServerConnected(BaseEvent):
+    async def __call__(self) -> dict:
+        return {'ok': True, 'tools': app.reindex()}
 
-class ToolkitService(A2Service):
-    subscribers = {
-        'mcp.*.ServerConnected': 'on_server_connected',
-        'mcp.*.ServerLost':      'on_server_lost',
-    }
+class OnMessageBroadcast(BaseEvent):
+    async def __call__(self) -> dict: ...
 
-class AgentService(A2Service):
-    subscribers = {'team.room.MessageBroadcast': 'on_broadcast'}
-
-class TraceService(A2Service):
-    subscribers = {'#': 'on_any'}
+class OnAny(BaseEvent):
+    async def __call__(self) -> dict: ...
 ```
 
-回调签名统一是 `async def m(self, message: BaseCommand) -> dict | None`，原始事件通过 `message._source` 取得（bollydog `RegistryService._register_subscribers` 生成的 handler 会把触发事件挂到 `_source`）。
+TOML 使用 `subscribe = { topic = "EventClassName" }`。订阅行为是 commands
+模块中的普通 `BaseEvent`，由 bollydog Exchange 绑定到 topic；来源消息通过
+`self.data['events'][-1]` 取得。需要继续执行 Command 时直接返回 Command，
+使用 bollydog handoff 语义。
 
 ---
 

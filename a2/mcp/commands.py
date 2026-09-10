@@ -21,7 +21,13 @@ class ConnectServer(BaseCommand):
         tools = await app.protocol.list_tools()
         count = app.register_tools(self.server, tools)
         app._connected[self.server] = {'transport': self.transport, 'tools': count}
-        await hub.emit(app.event('ServerConnected', server=self.server, tool_count=count, transport=self.transport))
+        event = app.event(
+            'ServerConnected',
+            server=self.server,
+            tool_count=count,
+            transport=self.transport,
+        )
+        await hub.emit(topic=type(event).destination, source=event)
         return {'server': self.server, 'tools': count}
 
 

@@ -3,31 +3,18 @@
 from __future__ import annotations
 
 import logging
-from typing import ClassVar
 
-from bollydog.globals import hub, registry
+from bollydog.globals import registry
 from bollydog.models.base import BaseCommand
 
-from a2.kernel import A2Service, safe_subscriber
+from a2.kernel import A2Service
 from a2.tool.models import ToolSpec
 
 logger = logging.getLogger(__name__)
 
-_BASE_FIELDS = {
-    'created_time', 'update_time', 'iid', 'sign', 'created_by',
-    'expire_time', 'delivery_count', 'state', 'trace_id', 'span_id',
-    'parent_span_id', 'data', 'host', 'version', 'module', 'alias', 'destination',
-}
-
-
 class ToolkitService(A2Service):
     domain = 'tool'
     commands = ['commands']
-    emits: ClassVar[list[str]] = ['ToolInvoked', 'ToolFailed', 'GroupActivated']
-    subscribers: ClassVar[dict] = {
-        'mcp.*.ServerConnected': 'on_server_connected',
-        'mcp.*.ServerLost': 'on_server_lost',
-    }
 
     groups: dict = {}
     always_on_groups: list = ['basic']
@@ -38,7 +25,7 @@ class ToolkitService(A2Service):
 
     def reindex(self) -> int:
         self._name_index.clear()
-        for dest, cls in registry.commands.items():
+        for dest, cls in registry.all_commands().items():
             alias = getattr(cls, 'alias', cls.__name__)
             group = getattr(cls, 'group', None) or self._group_of(dest)
             if group:
@@ -66,22 +53,19 @@ class ToolkitService(A2Service):
         return result
 
     def spec_of(self, destination: str) -> ToolSpec | None:
-        cls = registry.commands.get(destination)
+        cls = registry.all_commands().get(destination)
         if not cls or not issubclass(cls, BaseCommand):
             return None
-        props = {}
-        required = []
-        for name, field in cls.model_fields.items():
-            if name in _BASE_FIELDS:
-                continue
-            props[name] = {'type': self._json_type(field.annotation)}
-            if field.is_required():
-                required.append(name)
-        params = {'type': 'object', 'properties': props, 'required': required}
+        description = cls.describe()
+        params = {
+            'type': 'object',
+            'properties': description['parameters'],
+            'required': description['required'],
+        }
         return ToolSpec(
-            name=getattr(cls, 'alias', cls.__name__),
+            name=description['name'],
             destination=destination,
-            description=(cls.__doc__ or '').strip(),
+            description=description['description'],
             parameters=params,
             group=getattr(cls, 'group', 'basic'),
             read_only=getattr(cls, 'read_only', False),
@@ -89,24 +73,10 @@ class ToolkitService(A2Service):
             external=getattr(cls, 'external', False),
         )
 
-    @staticmethod
-    def _json_type(annotation) -> str:
-        if annotation in (int, 'int'):
-            return 'integer'
-        if annotation in (float, 'float'):
-            return 'number'
-        if annotation in (bool, 'bool'):
-            return 'boolean'
-        if getattr(annotation, '__origin__', None) is list:
-            return 'array'
-        if getattr(annotation, '__origin__', None) is dict:
-            return 'object'
-        return 'string'
-
     def resolve_tool(self, name: str) -> str:
         if name in self._name_index:
             return self._name_index[name]
-        for dest in registry.commands:
+        for dest in registry.all_commands():
             if dest.endswith(f'.{name}'):
                 return dest
         raise KeyError(f'tool not found: {name}')
@@ -139,16 +109,6 @@ class ToolkitService(A2Service):
         if runner and hasattr(runner, 'before'):
             runner.before(self._guard)
         self.reindex()
-
-    @safe_subscriber
-    async def on_server_connected(self, message: BaseCommand) -> dict:
-        self.reindex()
-        return {'ok': True}
-
-    @safe_subscriber
-    async def on_server_lost(self, message: BaseCommand) -> dict:
-        self.reindex()
-        return {'ok': True}
 
     async def _guard(self, message: BaseCommand):
         turn = message.data.get('session_id', '')

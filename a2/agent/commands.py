@@ -37,9 +37,13 @@ class Reply(BaseCommand):
             agent=agent_name,
             payload={'inputs_digest': str(len(self.inputs))},
         )
-        await hub.emit(
-            svc.event('ReplyStarted', session_id=self.session_id, turn_id=turn_id, agent=agent_name)
+        event = svc.event(
+            'ReplyStarted',
+            session_id=self.session_id,
+            turn_id=turn_id,
+            agent=agent_name,
         )
+        await hub.emit(topic=type(event).destination, source=event)
 
         resume = self.resume_state
         iteration = resume.get('iter', 0) if resume else 0
@@ -55,15 +59,14 @@ class Reply(BaseCommand):
                     agent=agent_name,
                     payload={'reason': 'user interrupt'},
                 )
-                await hub.emit(
-                    svc.event(
-                        'ReplyInterrupted',
-                        session_id=self.session_id,
-                        turn_id=turn_id,
-                        agent=agent_name,
-                        reason='user interrupt',
-                    )
+                event = svc.event(
+                    'ReplyInterrupted',
+                    session_id=self.session_id,
+                    turn_id=turn_id,
+                    agent=agent_name,
+                    reason='user interrupt',
                 )
+                await hub.emit(topic=type(event).destination, source=event)
                 return
 
             assembled = yield svc.resolve_ref(
@@ -142,19 +145,18 @@ class Reply(BaseCommand):
                 elif evt_type == 'model.failed':
                     yield await chunk('error', session_id=self.session_id, payload={'code': 'model_failed', 'message': evt.get('payload', {}).get('error', ''), 'retryable': True})
                     ms = int((time.time() - start) * 1000)
-                    await hub.emit(
-                        svc.event(
-                            'ReplyFinished',
-                            session_id=self.session_id,
-                            turn_id=turn_id,
-                            agent=agent_name,
-                            content=accumulated_content,
-                            usage=total_usage,
-                            finish_reason='error',
-                            ms=ms,
-                            inputs=self.inputs,
-                        )
+                    event = svc.event(
+                        'ReplyFinished',
+                        session_id=self.session_id,
+                        turn_id=turn_id,
+                        agent=agent_name,
+                        content=accumulated_content,
+                        usage=total_usage,
+                        finish_reason='error',
+                        ms=ms,
+                        inputs=self.inputs,
                     )
+                    await hub.emit(topic=type(event).destination, source=event)
                     return
 
             if not completed:
@@ -179,7 +181,7 @@ class Reply(BaseCommand):
             )
 
             for batch in svc.batch_calls(tool_calls):
-                if should_stop(self.session_id):
+                if await should_stop(self.session_id):
                     break
                 if len(batch) > 1:
                     results = []
@@ -246,15 +248,14 @@ class Reply(BaseCommand):
                     )
 
             iteration += 1
-            await hub.emit(
-                svc.event(
-                    'IterationCompleted',
-                    session_id=self.session_id,
-                    turn_id=turn_id,
-                    agent=agent_name,
-                    iter=iteration,
-                )
+            event = svc.event(
+                'IterationCompleted',
+                session_id=self.session_id,
+                turn_id=turn_id,
+                agent=agent_name,
+                iter=iteration,
             )
+            await hub.emit(topic=type(event).destination, source=event)
             yield await chunk(
                 'iteration.completed',
                 session_id=self.session_id,
@@ -277,19 +278,18 @@ class Reply(BaseCommand):
                 'usage': total_usage,
             },
         )
-        await hub.emit(
-            svc.event(
-                'ReplyFinished',
-                session_id=self.session_id,
-                turn_id=turn_id,
-                agent=agent_name,
-                content=accumulated_content,
-                usage=total_usage,
-                finish_reason=finish_reason,
-                ms=ms,
-                inputs=self.inputs,
-            )
+        event = svc.event(
+            'ReplyFinished',
+            session_id=self.session_id,
+            turn_id=turn_id,
+            agent=agent_name,
+            content=accumulated_content,
+            usage=total_usage,
+            finish_reason=finish_reason,
+            ms=ms,
+            inputs=self.inputs,
         )
+        await hub.emit(topic=type(event).destination, source=event)
 
 
 class Resume(BaseCommand):
@@ -373,6 +373,23 @@ class Spawn(BaseCommand):
             yield await chunk('subagent.chunk', session_id=self.session_id, payload={'agent': self.agent, 'data': evt})
         result = sub.state.result()
         yield await chunk('subagent.result', session_id=self.session_id, payload={'agent': self.agent, 'content': result})
+
+
+class OnMessageBroadcast(BaseEvent):
+    """Append a team broadcast to this agent's context."""
+
+    async def __call__(self) -> dict:
+        source = self.data.get('events', [{}])[-1]
+        ctx_key = f'context:{source.get("topic", "")}'
+        data = await session.get(ctx_key)
+        history = data.get('items', []) if isinstance(data, dict) else []
+        history.append({
+            'role': 'user',
+            'content': json.dumps(source.get('content', [])),
+            'name': source.get('sender', 'team'),
+        })
+        await session.set(ctx_key, {'items': history})
+        return {'ok': True}
 
 
 class ReplyStarted(BaseEvent):

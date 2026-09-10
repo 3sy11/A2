@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from bollydog.globals import app
-from bollydog.models.base import BaseCommand
+from bollydog.models.base import BaseCommand, BaseEvent
 
 
 class QueryTrace(BaseCommand):
@@ -55,3 +55,15 @@ class ListTraces(BaseCommand):
                     seen.add(tid)
                     traces.append({'trace_id': tid, 'spans': 1})
         return traces[self.offset : self.offset + self.limit]
+
+
+class OnAny(BaseEvent):
+    """Persist one observed event as a trace span."""
+
+    async def __call__(self) -> dict:
+        source = self.data.get('events', [{}])[-1]
+        span = app.to_span(source)
+        key = f'span:{span["trace_id"]}:{span["span_id"]}'
+        if app.protocol:
+            await app.protocol.set(key, span)
+        return {'ok': True}

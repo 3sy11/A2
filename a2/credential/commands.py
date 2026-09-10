@@ -43,7 +43,12 @@ class GetCredential(BaseCommand):
         key = f'cred:{self.user_id}:{self.system}'
         record = await app.protocol.get(key)
         if not record:
-            await hub.emit(app.event('CredentialMissing', user_id=self.user_id, system=self.system))
+            event = app.event(
+                'CredentialMissing',
+                user_id=self.user_id,
+                system=self.system,
+            )
+            await hub.emit(topic=type(event).destination, source=event)
             return {}
         decrypted = app.decrypt(record['payload'])
         return app.mask({**record, 'payload': decrypted})

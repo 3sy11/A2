@@ -94,15 +94,14 @@ class Compress(BaseCommand):
 
         after_tokens = svc.estimate(kept)
         folded = len(old)
-        await hub.emit(
-            svc.event(
-                'ContextCompacted',
-                session_id=self.session_id,
-                before_tokens=before_tokens,
-                after_tokens=after_tokens,
-                folded=folded,
-            )
+        event = svc.event(
+            'ContextCompacted',
+            session_id=self.session_id,
+            before_tokens=before_tokens,
+            after_tokens=after_tokens,
+            folded=folded,
         )
+        await hub.emit(topic=type(event).destination, source=event)
         return {
             'before_tokens': before_tokens,
             'after_tokens': after_tokens,
