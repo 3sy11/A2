@@ -9,7 +9,7 @@ from typing import ClassVar
 from bollydog.globals import app, hub, registry, session
 from bollydog.models.base import BaseCommand, BaseEvent
 
-from a2.kernel import chunk, relay_gen
+from a2.kernel import chunk, relay, relay_gen
 
 
 class ListTools(BaseCommand):
@@ -41,12 +41,15 @@ class Invoke(BaseCommand):
         svc = app
         start = time.time()
         try:
-            perm = yield CheckPermission(
-                session_id=self.session_id,
-                agent=self.agent,
-                tool=self.tool,
-                args=self.args,
-            )
+            if self.data.get('permission_action') == 'allow':
+                perm = {'action': 'allow', 'reason': ''}
+            else:
+                perm = yield CheckPermission(
+                    session_id=self.session_id,
+                    agent=self.agent,
+                    tool=self.tool,
+                    args=self.args,
+                )
             action = perm.get('action', 'allow')
             if action == 'deny':
                 yield await chunk(
@@ -78,7 +81,14 @@ class Invoke(BaseCommand):
 
             dest = svc.resolve_tool(self.tool)
             cmd = registry.resolve(dest)(**self.args)
-            cmd.data['session_id'] = self.session_id
+            cmd.data.update({
+                'session_id': self.session_id,
+                'turn_id': self.data.get('turn_id', ''),
+                'iteration': self.data.get('iteration', 0),
+                'messages': self.data.get('messages', []),
+            })
+            if 'session_id' in type(cmd).model_fields:
+                cmd.session_id = self.session_id
 
             if cmd.is_async_gen:
                 async for item in relay_gen(cmd):
@@ -89,8 +99,21 @@ class Invoke(BaseCommand):
                     )
                 result = cmd.state.result()
             else:
-                await hub.dispatch(cmd)
-                result = await cmd.state
+                result = await relay(cmd)
+
+            if isinstance(result, dict) and result.get('status') == 'parked':
+                yield await chunk(
+                    'tool.result',
+                    session_id=self.session_id,
+                    payload={
+                        'id': self.call_id,
+                        'status': 'parked',
+                        'output': result,
+                        'artifact': None,
+                        'truncated': False,
+                    },
+                )
+                return
 
             truncated_result, truncated = svc.truncate(
                 result if isinstance(result, dict) else {'result': result}
@@ -218,10 +241,19 @@ async def _park_confirm(invoke: Invoke) -> str:
         turn_id=invoke.data.get('turn_id', ''),
         kind='confirm',
         pending={
-            'tool': invoke.tool,
-            'args': invoke.args,
-            'call_id': invoke.call_id,
+            'iteration': invoke.data.get('iteration', 0),
+            'messages': invoke.data.get('messages', []),
+            'tool_call': {
+                'id': invoke.call_id,
+                'name': invoke.tool,
+                'input': invoke.args,
+            },
+            'reason': perm_reason(invoke),
         },
     )
-    await hub.dispatch(park_cmd)
-    return await park_cmd.state
+    return await relay(park_cmd)
+
+
+def perm_reason(invoke: Invoke) -> str:
+    """Direct Invoke callers have no earlier permission result to retain."""
+    return invoke.data.get('permission_reason', '')

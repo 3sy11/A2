@@ -34,17 +34,45 @@ class SessionService(A2Service):
         return f'park:{session_id}'
 
     def event_key(self, session_id: str, seq: int) -> str:
-        return f'evt:{session_id}:{seq}'
+        return f'evt:{session_id}:{seq:08d}'
 
     def context_from_turns(self, turns: list) -> list:
+        """Rebuild model context from completed conversation turns."""
         messages = []
-        for turn in turns:
+        for turn in sorted(turns, key=lambda item: item.get('created_at', 0)):
             for msg in turn.get('inputs', []):
                 messages.append(msg)
-            output = turn.get('output', {})
+            output = turn.get('output', [])
             if output:
-                messages.append(output)
+                messages.append({
+                    'role': 'assistant',
+                    'name': turn.get('agent', 'assistant'),
+                    'content': output,
+                })
         return messages
+
+    def pending_action_for_client(self, parked: dict) -> dict:
+        """Return only the information a client needs to continue a parked turn."""
+        pending = parked.get('pending', {})
+        result = {
+            'park_id': parked.get('park_id', ''),
+            'turn_id': parked.get('turn_id', ''),
+            'kind': parked.get('kind', ''),
+            'created_at': parked.get('created_at', 0),
+        }
+        if result['kind'] == 'confirm':
+            call = pending.get('tool_call', {})
+            result.update({
+                'tool': call.get('name', ''),
+                'args': call.get('input', {}),
+                'reason': pending.get('reason', ''),
+            })
+        elif result['kind'] == 'question':
+            result.update({
+                'question': pending.get('question', ''),
+                'options': pending.get('options', []),
+            })
+        return result
 
     def title_of(self, inputs: list) -> str:
         for msg in inputs:

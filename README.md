@@ -1,6 +1,7 @@
 # A2 — AI Agent Framework
 
-基于 [bollydog](https://github.com/3sy11/bollydog) 的事件驱动智能体框架，能力对齐 AgentScope，目标支撑 dataagent2。
+基于 [bollydog](https://github.com/3sy11/bollydog) 的事件驱动智能体框架。
+能力对齐 AgentScope、支撑 dataagent2 是设计目标；当前已完成 P0 对话保存、恢复和事件重放基础，仍是逐场景交付中的框架。
 
 ## 设计原则
 
@@ -14,7 +15,7 @@
 ```bash
 uv sync
 uv run pytest tests/ -v
-uv run bollydog service --config config/agent.toml
+ENTRYPOINT_HTTP_ENABLED=1 uv run bollydog service --config config/agent.toml
 ```
 
 ## 文档
@@ -24,7 +25,7 @@ uv run bollydog service --config config/agent.toml
 | [stories.md](docs/issues/20260826-a2-redesign/stories.md) | 29 场景、14 领域、Command/Event |
 | [interfaces.md](docs/issues/20260826-a2-redesign/interfaces.md) | 接口契约、领域模型 |
 | [notes.md](docs/issues/20260826-a2-redesign/notes.md) | 偏离与妥协（审计入口） |
-| [REGISTRY.md](docs/REGISTRY.md) | 当前注册表快照 |
+| [REGISTRY.md](docs/REGISTRY.md) | 当前框架设计、bollydog 能力边界、实现状态与目标差距 |
 | [skeleton.md](docs/issues/20260826-a2-redesign/skeleton.md) | Walking skeleton 说明 |
 
 ## 架构

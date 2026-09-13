@@ -534,3 +534,15 @@ bollydog 现有概念内闭合。
 ## 7 Walking Skeleton 说明（P7）
 
 见 `docs/issues/20260826-a2-redesign/skeleton.md`。
+
+---
+
+## 8 P0 实施记录（2026-09-12）
+
+- bollydog 全局 Session、会话档案、计划、凭证和追踪记录改为直接写入 SQLite。
+- Reply 在模型调用前保存用户消息；正常结束、中断和失败时保存已完成回合。
+- 等待用户确认或回答时，Park 保存当前回合和待处理事项，当前 SSE 请求结束；Resume
+  在后续请求中使用原 turn_id 继续。
+- 每条发送给前端的事件先保存，`ReplayEvents(last_seq)` 可读取断线后的事件。
+- 服务在工具执行中重启时，A2 不会自动重复执行该工具，因为工具是否已经产生副作用无法确认。
+- Chat 和 Embedding 命令拆分为独立模块，避免 bollydog 按模块扫描时发生错误注册。

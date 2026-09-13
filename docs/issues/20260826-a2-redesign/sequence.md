@@ -21,6 +21,10 @@
 
 **横切上下文**：`trace_id` / `parent_span_id` 由 `BaseCommand.model_post_init` 从 `message` 全局自动继承。业务级横切（`session_id` / `user_id` / `turn_id` / `agent`）放进 `BaseCommand.data`。
 
+> P0 实现状态：当前 Reply 在写入用户消息后装配模型上下文；每一条发送给前端的
+> 事件会先通过 `session.store.AppendEvent` 保存。图中的长期设计仍是目标描述，实际
+> 已交付范围以 `docs/REGISTRY.md` 为准。
+
 ---
 
 ## 图 0 — 冷启动（S29 恢复能力的前提）

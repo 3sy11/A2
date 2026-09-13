@@ -18,7 +18,7 @@ _BASE_COMMAND_FIELDS = {
 
 class ChatModelService(A2Service):
     domain = 'model'
-    commands = ['commands']
+    commands = ['chat_commands']
 
     provider: str = 'scripted'
     model: str = 'gpt-4o'
@@ -70,7 +70,7 @@ class ChatModelService(A2Service):
 
 class EmbeddingService(A2Service):
     domain = 'model'
-    commands = ['commands']
+    commands = ['embedding_commands']
     alias = 'embed'
 
     model: str = 'text-embedding-3-small'

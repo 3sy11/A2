@@ -20,11 +20,17 @@ root = ".a2/workspace"
 ["adapters.knowledge"]
 module = "a2.protocols.impl.InMemoryVectorProtocol"
 
-["adapters.session"]
-module = "bollydog.adapters.memory.MemoryProtocol"
+["adapters.runtime_state"]
+module = "bollydog.adapters.memory.SQLiteProtocol"
+path = ".a2/state/runtime.db"
 
-["adapters.plan"]
-module = "bollydog.adapters.memory.MemoryProtocol"
+["adapters.session_store"]
+module = "bollydog.adapters.memory.SQLiteProtocol"
+path = ".a2/state/session.db"
+
+["adapters.plan_store"]
+module = "bollydog.adapters.memory.SQLiteProtocol"
+path = ".a2/state/plan.db"
 
 ["adapters.memory"]
 module = "bollydog.adapters.memory.MemoryProtocol"
@@ -32,14 +38,20 @@ module = "bollydog.adapters.memory.MemoryProtocol"
 ["adapters.mcp"]
 module = "bollydog.adapters.memory.MemoryProtocol"
 
-["adapters.credential"]
-module = "bollydog.adapters.memory.MemoryProtocol"
+["adapters.credential_store"]
+module = "bollydog.adapters.memory.SQLiteProtocol"
+path = ".a2/state/credential.db"
 
 ["adapters.team"]
 module = "bollydog.adapters.memory.MemoryProtocol"
 
-["adapters.observe"]
-module = "bollydog.adapters.memory.MemoryProtocol"
+["adapters.observe_store"]
+module = "bollydog.adapters.memory.SQLiteProtocol"
+path = ".a2/state/observe.db"
+
+["bollydog.Session"]
+module = "bollydog.service.session.Session"
+protocol = "adapters.runtime_state"
 
 ["adapters.schedule"]
 module = "bollydog.adapters.memory.MemoryProtocol"
@@ -60,10 +72,12 @@ subscribe = { "team.*.MessageBroadcast" = "OnMessageBroadcast" }
 
 ["agent.assistant".routers]
 Reply = ["SSE", "/api/agent/reply"]
+Resume = ["SSE", "/api/agent/resume"]
+Interrupt = ["POST", "/api/agent/interrupt"]
 
 ["model.chat"]
 module = "a2.model.service.ChatModelService"
-commands = ["commands"]
+commands = ["chat_commands"]
 protocol = "adapters.scripted_chat"
 provider = "scripted"
 model = "gpt-4o"
@@ -72,7 +86,7 @@ context_size = 128000
 
 ["model.embed"]
 module = "a2.model.service.EmbeddingService"
-commands = ["commands"]
+commands = ["embedding_commands"]
 protocol = "adapters.hash_embedding"
 model = "text-embedding-3-small"
 dimension = 16
@@ -109,8 +123,12 @@ mcp = []
 ["session.store"]
 module = "a2.session.service.SessionService"
 commands = ["commands"]
-protocol = "adapters.session"
-subscribe = { "agent.*.ReplyFinished" = "OnReplyFinished", "agent.*.ReplyParked" = "OnReplyParked" }
+protocol = "adapters.session_store"
+subscribe = { "agent.*.ReplyParked" = "OnReplyParked" }
+
+["session.store".routers]
+OpenSession = ["POST", "/api/sessions/open"]
+ReplayEvents = ["SSE", "/api/sessions/{session_id}/events"]
 
 ["workspace.local"]
 module = "a2.workspace.service.WorkspaceService"
@@ -122,7 +140,7 @@ exec_timeout = 120
 ["plan.notebook"]
 module = "a2.plan.service.PlanService"
 commands = ["commands"]
-protocol = "adapters.plan"
+protocol = "adapters.plan_store"
 
 ["skill.hub"]
 module = "a2.skill.service.SkillService"
@@ -151,7 +169,7 @@ chunk_size = 800
 ["credential.vault"]
 module = "a2.credential.service.CredentialService"
 commands = ["commands"]
-protocol = "adapters.credential"
+protocol = "adapters.credential_store"
 
 ["team.room"]
 module = "a2.team.service.TeamService"
@@ -161,7 +179,7 @@ protocol = "adapters.team"
 ["observe.tracer"]
 module = "a2.observe.service.TraceService"
 commands = ["commands"]
-protocol = "adapters.observe"
+protocol = "adapters.observe_store"
 subscribe = { "#" = "OnAny" }
 
 ["entry.http"]

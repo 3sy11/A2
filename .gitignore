@@ -191,6 +191,9 @@ cython_debug/
 # Ruff stuff:
 .ruff_cache/
 
+# A2 local runtime state
+.a2/state/
+
 # PyPI configuration file
 .pypirc
 

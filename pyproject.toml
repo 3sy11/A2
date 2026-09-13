@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "bollydog>=0.1.0",
+    "aiosqlite==0.22.0",
     "PyYAML>=6.0",
     "pydantic>=2.0.0",
     "fire>=0.5.0",

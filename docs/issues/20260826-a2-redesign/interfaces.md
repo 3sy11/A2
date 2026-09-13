@@ -391,6 +391,11 @@ class Credential(BaseDomain):
 | `AppendEvent(session_id: str, turn_id: str, chunk: dict) → int` |
 | `ReplayEvents(session_id: str, last_seq: int) → AsyncGen[dict]` |
 
+当前 P0 实现补充：`OpenSession` 返回值包含 `resumable: bool` 与
+`pending_actions: list`。`pending_actions` 只描述前端需要展示的待处理事项：
+待确认工具的名称、参数和原因，或待回答问题的内容和选项。`SaveTurn` 保存一个已经
+正常结束、被中断或模型失败的完整对话回合；`AppendEvent` 在 Reply 将事件发送给前端前写入。
+
 ### 3.10 `workspace` 域 — `a2/workspace/commands.py`（同时是工具）
 
 | 签名 | 工具分组 |

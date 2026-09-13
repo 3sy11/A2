@@ -4,14 +4,17 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-from bollydog.globals import app, hub
+from bollydog.globals import app
 from bollydog.models.base import BaseCommand
+
+from a2.kernel import relay
 
 
 class AskHuman(BaseCommand):
     """Ask the user a question and park the turn."""
     group: ClassVar[str] = 'basic'
     external: ClassVar[bool] = True
+    concurrency_safe: ClassVar[bool] = False
 
     question: str = ''
     options: list = []
@@ -21,22 +24,23 @@ class AskHuman(BaseCommand):
         park_cmd = app.resolve_ref(
             app.session_ref, 'Park',
             session_id=self.session_id,
-            turn_id='',
+            turn_id=self.data.get('turn_id', ''),
             kind='question',
-            pending={'question': self.question, 'options': self.options},
+            pending={
+                'iteration': self.data.get('iteration', 0),
+                'messages': self.data.get('messages', []),
+                'question': self.question,
+                'options': self.options,
+            },
         )
-        await hub.dispatch(park_cmd)
-        park_id = await park_cmd.state
-        event = app.event(
-            'ReplyParked',
-            session_id=self.session_id,
-            turn_id='',
-            agent=app.alias,
-            park_id=park_id,
-            kind='question',
-        )
-        await hub.emit(topic=type(event).destination, source=event)
-        return {'status': 'parked', 'park_id': park_id}
+        park_id = await relay(park_cmd)
+        return {
+            'status': 'parked',
+            'kind': 'question',
+            'park_id': park_id,
+            'question': self.question,
+            'options': self.options,
+        }
 
 
 class PresentFiles(BaseCommand):

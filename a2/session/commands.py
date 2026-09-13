@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 import uuid
 
-from bollydog.globals import app
+from bollydog.globals import app, session
 from bollydog.models.base import BaseCommand, BaseEvent
 
 
@@ -22,11 +22,27 @@ class OpenSession(BaseCommand):
         existing = await app.protocol.get(key)
         if existing:
             parks = await app.protocol.get(app.park_key(sid))
-            return {**existing, 'resumable': bool(parks)}
+            pending_actions = [
+                app.pending_action_for_client(state)
+                for state in (parks or {}).values()
+            ]
+            runtime = await session.get(f'turn:{sid}')
+            if runtime.get('status') in {'running', 'interrupt_requested'}:
+                pending_actions.append({
+                    'kind': 'crash',
+                    'turn_id': runtime.get('turn_id', ''),
+                    'phase': runtime.get('phase', ''),
+                    'last_event_seq': runtime.get('last_event_seq', 0),
+                })
+            return {
+                **existing,
+                'resumable': bool(pending_actions),
+                'pending_actions': pending_actions,
+            }
         record = app.new_record(sid, self.user_id, self.agent)
         record['title'] = 'New conversation'
         await app.protocol.set(key, record)
-        return {**record, 'resumable': False}
+        return {**record, 'resumable': False, 'pending_actions': []}
 
 
 class SaveTurn(BaseCommand):
@@ -38,13 +54,21 @@ class SaveTurn(BaseCommand):
 
     async def __call__(self) -> int:
         key = app.turn_key(self.session_id, self.turn_id)
-        await app.protocol.set(key, self.record)
+        existed = await app.protocol.exists(key)
+        record = {
+            **self.record,
+            'session_id': self.session_id,
+            'turn_id': self.turn_id,
+            'created_at': self.record.get('created_at', time.time()),
+        }
+        await app.protocol.set(key, record)
         session_key = app.session_key(self.session_id)
         session_rec = await app.protocol.get(session_key) or {}
-        session_rec['turn_count'] = session_rec.get('turn_count', 0) + 1
+        if not existed:
+            session_rec['turn_count'] = session_rec.get('turn_count', 0) + 1
         session_rec['updated_at'] = time.time()
         if not session_rec.get('title'):
-            session_rec['title'] = app.title_of(self.record.get('inputs', []))
+            session_rec['title'] = app.title_of(record.get('inputs', []))
         await app.protocol.set(session_key, session_rec)
         return session_rec['turn_count']
 
@@ -60,11 +84,13 @@ class LoadSession(BaseCommand):
         session_rec = await app.protocol.get(session_key) or {}
         prefix = f'turn:{self.session_id}:'
         turns = []
-        keys = await app.protocol.keys(prefix) if hasattr(app.protocol, 'keys') else []
-        for key in sorted(keys)[-self.last_n :]:
+        keys = await app.protocol.keys(f'{prefix}*') if hasattr(app.protocol, 'keys') else []
+        for key in keys:
             turn = await app.protocol.get(key)
             if turn:
                 turns.append(turn)
+        turns.sort(key=lambda item: item.get('created_at', 0))
+        turns = turns[-self.last_n :]
         return {'session': session_rec, 'turns': turns}
 
 
@@ -76,7 +102,7 @@ class ListSessions(BaseCommand):
     offset: int = 0
 
     async def __call__(self) -> list:
-        keys = await app.protocol.keys('session:') if hasattr(app.protocol, 'keys') else []
+        keys = await app.protocol.keys('session:*') if hasattr(app.protocol, 'keys') else []
         sessions = []
         for key in keys:
             rec = await app.protocol.get(key)
@@ -93,6 +119,17 @@ class DeleteSession(BaseCommand):
 
     async def __call__(self) -> int:
         await app.protocol.remove(app.session_key(self.session_id))
+        for prefix in (f'turn:{self.session_id}:', f'evt:{self.session_id}:'):
+            for key in await app.protocol.keys(f'{prefix}*'):
+                await app.protocol.remove(key)
+        await app.protocol.remove(app.park_key(self.session_id))
+        for key in (
+            f'context:{self.session_id}',
+            f'summary:{self.session_id}',
+            f'turn:{self.session_id}',
+            f'chunk_seq:{self.session_id}',
+        ):
+            await session.delete(key)
         return 1
 
 
@@ -145,7 +182,10 @@ class AppendEvent(BaseCommand):
     async def __call__(self) -> int:
         seq = self.chunk.get('seq', 0)
         key = app.event_key(self.session_id, seq)
-        await app.protocol.set(key, self.chunk)
+        await app.protocol.set(key, {**self.chunk, 'turn_id': self.turn_id})
+        expired = seq - app.event_retention
+        if expired > 0:
+            await app.protocol.remove(app.event_key(self.session_id, expired))
         return seq
 
 
@@ -157,7 +197,7 @@ class ReplayEvents(BaseCommand):
 
     async def __call__(self):
         prefix = f'evt:{self.session_id}:'
-        keys = await app.protocol.keys(prefix) if hasattr(app.protocol, 'keys') else []
+        keys = await app.protocol.keys(f'{prefix}*') if hasattr(app.protocol, 'keys') else []
         events = []
         for key in keys:
             seq = int(key.split(':')[-1])
