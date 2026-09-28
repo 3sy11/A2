@@ -35,6 +35,10 @@ path = ".a2/state/plan.db"
 ["adapters.memory"]
 module = "bollydog.adapters.memory.MemoryProtocol"
 
+["adapters.memory_store"]
+module = "bollydog.adapters.memory.SQLiteProtocol"
+path = ".a2/state/memory.db"
+
 ["adapters.mcp"]
 module = "bollydog.adapters.memory.MemoryProtocol"
 
@@ -59,12 +63,22 @@ module = "bollydog.adapters.memory.MemoryProtocol"
 ["agent.assistant"]
 module = "a2.agent.service.AgentService"
 commands = ["commands", "tools"]
-depends = ["context.default", "tool.toolkit", "session.store"]
+depends = ["context.default", "tool.toolkit", "session.store", "plan.notebook", "skill.hub", "knowledge.base", "memory.longterm"]
 model_ref = "model.chat"
 context_ref = "context.default"
 tool_ref = "tool.toolkit"
 session_ref = "session.store"
 plan_ref = "plan.notebook"
+knowledge_ref = "knowledge.base"
+skill_ref = "skill.hub"
+memory_ref = "memory.longterm"
+rag_mode = "on"
+rag_top_k = 5
+skill_mode = "catalog"
+max_skills = 8
+memory_mode = "recall_write"
+memory_top_k = 5
+plan_mode = "tool"
 system_prompt = "You are a helpful AI assistant built on A2."
 tool_groups = ["basic"]
 max_iters = 20
@@ -115,7 +129,11 @@ basic = [
     "workspace.local.ReadArtifact",
     "agent.assistant.AskHuman",
     "agent.assistant.PresentFiles",
+    "agent.assistant.ActivateToolGroup",
 ]
+skill = ["skill.hub.ListSkills", "skill.hub.MatchSkills", "skill.hub.LoadSkill"]
+plan = ["plan.notebook.CreatePlan", "plan.notebook.UpdateTask", "plan.notebook.ListTasks"]
+knowledge = ["knowledge.base.Search", "knowledge.base.IngestDocument"]
 edit = ["workspace.local.WritePath", "workspace.local.EditPath"]
 exec = ["workspace.local.RunCommand", "workspace.local.RunPython"]
 mcp = []
@@ -150,7 +168,7 @@ skill_dirs = [".a2/skills"]
 ["memory.longterm"]
 module = "a2.memory.service.MemoryService"
 commands = ["commands"]
-protocol = "adapters.memory"
+protocol = "adapters.memory_store"
 embed_ref = "model.embed"
 subscribe = { "agent.*.ReplyFinished" = "OnReplyFinished" }
 

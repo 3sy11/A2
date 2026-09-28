@@ -36,6 +36,13 @@ class LoadSkill(BaseCommand):
         result = {'name': self.name, 'body': body}
         if self.include_resources:
             result['resources'] = []
+        if body:
+            event = app.event(
+                'SkillActivated',
+                session_id=self.data.get('session_id', ''),
+                skills=[self.name],
+            )
+            await hub.emit(topic=type(event).destination, source=event)
         return result
 
 

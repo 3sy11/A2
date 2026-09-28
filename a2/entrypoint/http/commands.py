@@ -27,7 +27,7 @@ class Chat(BaseCommand):
         )
         yield open_cmd
         reply = registry.resolve(f'agent.{self.agent}.Reply')(
-            session_id=sid,
+            session_id=sid, user_id=self.user_id,
             inputs=[{'role': 'user', 'content': self.message, 'name': 'user'}],
             structured_schema=None,
             resume_state=None,

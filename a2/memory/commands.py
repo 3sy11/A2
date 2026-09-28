@@ -5,8 +5,10 @@ from __future__ import annotations
 import time
 import uuid
 
-from bollydog.globals import app, hub
+from bollydog.globals import app
 from bollydog.models.base import BaseCommand, BaseEvent
+
+from a2.kernel import relay
 
 
 class Recall(BaseCommand):
@@ -19,7 +21,7 @@ class Recall(BaseCommand):
 
     async def __call__(self) -> list:
         prefix = f'memory:{self.scope}:{self.subject}:'
-        keys = await app.protocol.keys(prefix) if hasattr(app.protocol, 'keys') else []
+        keys = await app.protocol.keys(f'{prefix}*') if hasattr(app.protocol, 'keys') else []
         entries = []
         for key in keys:
             entry = await app.protocol.get(key)
@@ -72,15 +74,16 @@ class OnReplyFinished(BaseEvent):
 
     async def __call__(self) -> dict:
         source = self.data.get('events', [{}])[-1]
+        user_id = source.get('user_id', '')
         facts = app.extract_facts(source)
         for fact in facts:
             remember = app.resolve_ref(
                 'memory.longterm',
                 'Remember',
-                scope='user',
-                subject=source.get('session_id', ''),
+                scope='user' if user_id else 'session',
+                subject=user_id or source.get('session_id', ''),
                 text=fact['text'],
                 kind=fact.get('kind', 'fact'),
             )
-            await hub.dispatch(remember)
+            await relay(remember)
         return {'ok': True, 'facts': len(facts)}

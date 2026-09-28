@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from bollydog.globals import app
+from bollydog.globals import app, registry
 from bollydog.models.base import BaseCommand, BaseEvent
+
+from a2.kernel import relay
 
 
 class QueryTrace(BaseCommand):
@@ -29,10 +31,8 @@ class ExportTrace(BaseCommand):
     fmt: str = 'json'
 
     async def __call__(self) -> dict:
-        from bollydog.globals import hub
-        cmd = QueryTrace(trace_id=self.trace_id)
-        await hub.dispatch(cmd)
-        trace = await cmd.state
+        cmd = registry.resolve(f'{app.domain}.{app.alias}.QueryTrace')(trace_id=self.trace_id)
+        trace = await relay(cmd)
         return {'format': self.fmt, 'case': trace}
 
 

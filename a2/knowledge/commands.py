@@ -7,7 +7,7 @@ import uuid
 from bollydog.globals import app, hub, registry
 from bollydog.models.base import BaseCommand, BaseEvent
 
-from a2.kernel import chunk
+from a2.kernel import chunk, relay
 
 
 class IngestDocument(BaseCommand):
@@ -25,6 +25,10 @@ class IngestDocument(BaseCommand):
         yield await chunk('ingest.parsed', payload={'sections': len(sections)})
         chunks = app.chunk(sections, self.chunk_size or None, self.overlap or None)
         total = len(chunks)
+        # Sub-commands must be built through the registry: only the class the
+        # registry registered carries the destination, and a command without one
+        # gets no owning service, so `app.protocol` is unavailable inside it.
+        upsert_cls = registry.resolve(f'{app.domain}.{app.alias}.UpsertChunks')
         for i, batch in enumerate(app.batches(chunks)):
             texts = [c['text'] for c in batch]
             embed_cmd = registry.resolve('model.embed.Embed')(texts=texts, model='')
@@ -38,7 +42,7 @@ class IngestDocument(BaseCommand):
                     'vector': vec,
                     'metadata': c.get('metadata', {}),
                 })
-            yield UpsertChunks(collection=self.collection, items=items)
+            yield upsert_cls(collection=self.collection, items=items)
             yield await chunk('ingest.progress', payload={'done': min((i + 1) * 32, total), 'total': total})
         event = app.event(
             'DocumentIngested',
@@ -69,10 +73,8 @@ class Search(BaseCommand):
     score_threshold: float = 0.0
 
     async def __call__(self) -> list:
-        from bollydog.globals import hub
         embed_cmd = registry.resolve('model.embed.Embed')(texts=[self.query], model='')
-        await hub.dispatch(embed_cmd)
-        vectors = await embed_cmd.state
+        vectors = await relay(embed_cmd)
         hits = await app.protocol.search(self.collection, vectors[0], self.top_k)
         return [h for h in hits if h.get('score', 0) >= self.score_threshold]
 

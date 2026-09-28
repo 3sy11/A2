@@ -27,6 +27,10 @@ class Assemble(BaseCommand):
     tool_names: list = []
     budget: int = 0
     rag_query: str = ''
+    rag_hits: list = []
+    memories: list = []
+    skills: list = []
+    plan: dict = {}
 
     async def __call__(self) -> dict:
         svc = app
@@ -40,7 +44,10 @@ class Assemble(BaseCommand):
             'system_prompt': self.system_prompt,
             'summary': summary,
             'hints': [h for h in hints if h],
-            'rag_hits': [],
+            'rag_hits': self.rag_hits,
+            'memories': self.memories,
+            'skills': self.skills,
+            'plan': self.plan,
             'history': history,
             'inputs': self.inputs,
         }
@@ -50,7 +57,13 @@ class Assemble(BaseCommand):
             'messages': messages,
             'tokens': tokens,
             'need_compress': svc.need_compress(tokens),
-            'injected': parts.get('hints', []),
+            'injected': {
+                'hints': parts['hints'],
+                'rag_hits': len(self.rag_hits),
+                'memories': len(self.memories),
+                'skills': len(self.skills),
+                'plan': bool(self.plan),
+            },
         }
 
 

@@ -27,10 +27,17 @@ class ContextService(A2Service):
         summary = parts.get('summary', '')
         if summary:
             messages.append({'role': 'system', 'content': f'Previous summary:\n{summary}'})
+        for render, key in (
+            (self.render_skills, 'skills'),
+            (self.render_memories, 'memories'),
+            (self.render_plan, 'plan'),
+            (self.render_hits, 'rag_hits'),
+        ):
+            text = render(parts.get(key))
+            if text:
+                messages.append({'role': 'system', 'content': text})
         for hint in parts.get('hints', []):
             messages.append({'role': 'system', 'content': hint})
-        for hit in parts.get('rag_hits', []):
-            messages.append({'role': 'system', 'content': self.render_hits([hit])})
         messages.extend(parts.get('history', []))
         messages.extend(parts.get('inputs', []))
         return messages
@@ -76,6 +83,31 @@ class ContextService(A2Service):
             text = hit.get('text', '')[:500]
             lines.append(f'- [{source}] {text}')
         return '\n'.join(lines)
+
+    def render_skills(self, skills: list) -> str:
+        """Level-1 disclosure: names and descriptions only, never the body."""
+        if not skills:
+            return ''
+        lines = ['Available skills (call LoadSkill to read one before using it):']
+        for skill in skills:
+            lines.append(f'- {skill.get("name", "")}: {skill.get("description", "")}')
+        return '\n'.join(lines)
+
+    def render_memories(self, memories: list) -> str:
+        if not memories:
+            return ''
+        lines = ['Known facts about the user:']
+        for entry in memories:
+            text = entry.get('text', '') if isinstance(entry, dict) else str(entry)
+            if text:
+                lines.append(f'- {text[:500]}')
+        return '\n'.join(lines)
+
+    def render_plan(self, plan: dict) -> str:
+        if not plan:
+            return ''
+        rendered = plan.get('rendered', '') if isinstance(plan, dict) else ''
+        return f'Current task list:\n{rendered}' if rendered else ''
 
     def estimate(self, msgs: list) -> int:
         return sum(max(1, len(str(m.get('content', ''))) // 4) for m in msgs)

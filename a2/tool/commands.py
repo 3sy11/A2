@@ -44,7 +44,9 @@ class Invoke(BaseCommand):
             if self.data.get('permission_action') == 'allow':
                 perm = {'action': 'allow', 'reason': ''}
             else:
-                perm = yield CheckPermission(
+                perm = yield registry.resolve(
+                    f'{svc.domain}.{svc.alias}.CheckPermission'
+                )(
                     session_id=self.session_id,
                     agent=self.agent,
                     tool=self.tool,

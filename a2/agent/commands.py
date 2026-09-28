@@ -40,6 +40,11 @@ async def _append_context(svc, session_id: str, messages: list) -> int:
     ))
 
 
+async def _ctx_items(session_id: str) -> list:
+    data = await session.get(f'context:{session_id}')
+    return data.get('items', []) if isinstance(data, dict) else []
+
+
 async def _save_completed_turn(svc, *, session_id: str, turn_id: str,
                                agent: str, inputs: list, content: list,
                                usage: dict, finish_reason: str,
@@ -75,6 +80,7 @@ class Reply(BaseCommand):
     """Run one durable agent conversation turn."""
 
     session_id: str = ''
+    user_id: str = ''
     inputs: list = []
     structured_schema: dict | None = None
     resume_state: dict | None = None
@@ -85,6 +91,7 @@ class Reply(BaseCommand):
         agent_name = svc.alias
         resume = self.resume_state or {}
         pending = resume.get('pending', {})
+        user_id = self.user_id or resume.get('user_id', '')
         turn_id = resume.get('turn_id') or uid('turn_')
         iteration = int(pending.get('iteration', resume.get('iter', 0)))
         max_iters = self.max_iters or svc.max_iters
@@ -95,8 +102,9 @@ class Reply(BaseCommand):
         if not resume:
             await relay(svc.resolve_ref(
                 svc.session_ref, 'OpenSession', session_id=self.session_id,
-                user_id='', agent=agent_name,
+                user_id=user_id, agent=agent_name,
             ))
+            await self._seed_tool_groups(svc)
             loaded = await relay(svc.resolve_ref(
                 svc.session_ref, 'LoadSession', session_id=self.session_id, last_n=50,
             ))
@@ -150,6 +158,7 @@ class Reply(BaseCommand):
         await _write_progress(
             self.session_id, status='running', phase='before_model', turn_id=turn_id,
             iteration=iteration, inputs=self.inputs, total_usage=total_usage,
+            user_id=user_id,
         )
         yield await _record_event(
             svc, 'reply.started', session_id=self.session_id, turn_id=turn_id,
@@ -167,11 +176,13 @@ class Reply(BaseCommand):
                     yield event
                 return
 
-            assembled = await relay(svc.resolve_ref(
-                svc.context_ref, 'Assemble', session_id=self.session_id,
-                agent=agent_name, inputs=[], system_prompt=svc.system_prompt_of(self.session_id),
-                tool_names=[], budget=0, rag_query='',
-            ))
+            # Gathered once per iteration: the post-compression reassembly below
+            # must not re-embed and re-search for the same turn.
+            sources = await svc.collect_sources(
+                session_id=self.session_id, user_id=user_id,
+                query=svc.last_user_text(await _ctx_items(self.session_id), self.inputs),
+            )
+            assembled = await self._assemble(svc, agent_name, sources)
             if assembled.get('need_compress'):
                 yield await _record_event(
                     svc, 'context.compacting', session_id=self.session_id,
@@ -186,15 +197,11 @@ class Reply(BaseCommand):
                     svc, 'context.compacted', session_id=self.session_id,
                     turn_id=turn_id, agent=agent_name, payload=compressed,
                 )
-                assembled = await relay(svc.resolve_ref(
-                    svc.context_ref, 'Assemble', session_id=self.session_id,
-                    agent=agent_name, inputs=[], system_prompt=svc.system_prompt_of(self.session_id),
-                    tool_names=[], budget=0, rag_query='',
-                ))
+                assembled = await self._assemble(svc, agent_name, sources)
 
             tools = await relay(svc.resolve_ref(
                 svc.tool_ref, 'ListTools', session_id=self.session_id,
-                agent=agent_name, groups=svc.tool_groups,
+                agent=agent_name, groups=[],
             ))
             tool_schemas = [{
                 'type': 'function',
@@ -322,9 +329,24 @@ class Reply(BaseCommand):
             'ReplyFinished', session_id=self.session_id, turn_id=turn_id,
             agent=agent_name, content=accumulated_content, usage=total_usage,
             finish_reason=finish_reason, ms=int((time.time() - started_at) * 1000),
-            inputs=self.inputs,
+            inputs=self.inputs, user_id=user_id,
         )
         await hub.emit(topic=type(event).destination, source=event)
+
+    async def _assemble(self, svc, agent_name: str, sources: dict) -> dict:
+        """Assemble the model input from already-collected context sources."""
+        return await relay(svc.resolve_ref(
+            svc.context_ref, 'Assemble', session_id=self.session_id,
+            agent=agent_name, inputs=[], system_prompt=svc.system_prompt_of(self.session_id),
+            tool_names=[], budget=0, rag_query='', **sources,
+        ))
+
+    async def _seed_tool_groups(self, svc) -> None:
+        """Start the session's active tool groups from the agent's own default."""
+        key = f'tool_groups:{self.session_id}'
+        if await session.get(key):
+            return
+        await session.set(key, {'groups': list(svc.tool_groups)})
 
     async def _invoke_call(self, svc, call: dict, turn_id: str, iteration: int,
                            agent_name: str, permission_action: str):
@@ -440,8 +462,11 @@ class Resume(BaseCommand):
     park_id: str = ''
     decision: str = ''
     answer: str = ''
+    user_id: str = ''
 
     async def __call__(self):
+        progress = await session.get(f'turn:{self.session_id}')
+        user_id = self.user_id or progress.get('user_id', '')
         if self.park_id:
             # Validate against the stored record before removing it.  A client
             # typo must not make the pending confirmation/question disappear.
@@ -464,7 +489,6 @@ class Resume(BaseCommand):
                 app.session_ref, 'Unpark', session_id=self.session_id, park_id=self.park_id,
             )
         else:
-            progress = await session.get(f'turn:{self.session_id}')
             state = {'turn_id': progress.get('turn_id', ''), 'kind': 'crash', 'pending': progress}
         if not state.get('turn_id'):
             yield await chunk('error', session_id=self.session_id, payload={
@@ -473,11 +497,12 @@ class Resume(BaseCommand):
             })
             return
         reply = registry.resolve(f'agent.{app.alias}.Reply')(
-            session_id=self.session_id, inputs=[], structured_schema=None,
+            session_id=self.session_id, user_id=user_id, inputs=[],
+            structured_schema=None,
             resume_state={
                 'turn_id': state.get('turn_id', ''), 'kind': state.get('kind', ''),
                 'pending': state.get('pending', {}), 'decision': self.decision,
-                'answer': self.answer,
+                'answer': self.answer, 'user_id': user_id,
             }, max_iters=0,
         )
         async for event in relay_gen(reply):
@@ -516,11 +541,12 @@ class Spawn(BaseCommand):
     agent: str = ''
     task: str = ''
     session_id: str = ''
+    user_id: str = ''
     inherit_context: bool = False
 
     async def __call__(self):
         sub = registry.resolve(f'agent.{self.agent}.Reply')(
-            session_id=self.session_id,
+            session_id=self.session_id, user_id=self.user_id,
             inputs=[{'role': 'user', 'content': self.task}],
             structured_schema=None, resume_state=None, max_iters=0,
         )
@@ -565,6 +591,7 @@ class ReplyFinished(BaseEvent):
     finish_reason: str = ''
     ms: int = 0
     inputs: list = []
+    user_id: str = ''
 
 
 class ReplyInterrupted(BaseEvent):

@@ -546,3 +546,47 @@ bollydog 现有概念内闭合。
 - 每条发送给前端的事件先保存，`ReplayEvents(last_seq)` 可读取断线后的事件。
 - 服务在工具执行中重启时，A2 不会自动重复执行该工具，因为工具是否已经产生副作用无法确认。
 - Chat 和 Embedding 命令拆分为独立模块，避免 bollydog 按模块扫描时发生错误注册。
+
+## 9 P1-A 实施记录（2026-09-28）
+
+接入范围：Plan、Skill、Knowledge、Memory 与工具分组激活进入 `Reply` / `Assemble`
+（S03/S10/S11/S13/S23）。设计细节见 [REGISTRY.md §4.4](../../REGISTRY.md)。
+
+### 偏离
+
+- **D-14 采集在 Agent，渲染在 Context。** `stories.md` §3.2 与 `sequence.md` 图 7b 把
+  `knowledge.base.Search` 画在 `Assemble` 内部，并给 `ContextService` 加
+  `depends = [skill.hub, plan.notebook]`。实际实现改为 `AgentService.collect_sources()`
+  采集、`Assemble` 只接收纯数据并渲染。理由：`Assemble` 每轮迭代会被调用两次
+  （压缩前、压缩后），检索放在里面会重复执行；且 `ContextService` 的定位是纯计算，
+  是全框架最容易单测的部分，不该变成调度器。代价是 `Assemble` 多出四个入参。
+- **S03 不做自动规划识别。** 是否建清单由模型经 `plan` 工具组自行决定，不加
+  "多步请求"启发式；`PlanCreated` / `TaskUpdated` / `PlanCompleted` 仍只走旁路 Event，
+  客户端通过 `tool.result` 看到清单变化，没有独立的 `plan.updated` 客户端事件。
+
+### 修复的历史缺陷（接入后实测暴露）
+
+这三处都是"有类和命令、但没有场景测试"掩盖的问题，接入主链路后才第一次真正执行到：
+
+- **子命令必须经 registry 构造。** bollydog 只给 registry 注册的动态子类写
+  `destination`（`bootstrap.py` 中 `type(_obj.__name__, (_obj,), {'destination': dest})`），
+  模块里的原类 `destination` 仍是 `None`。而 `resolve_app` 依赖 `type(msg).destination`
+  找宿主服务，取不到就把 `app` 置空，命令里的 `app.protocol` 随即 `AttributeError`。
+  受影响：`knowledge.commands.IngestDocument`（`yield UpsertChunks(...)`）、
+  `tool.commands.Invoke`（`yield CheckPermission(...)`）、
+  `observe.commands.ExportTrace`（`QueryTrace(...)`）。三处均改为 `registry.resolve`。
+- **测试/内联执行下 `hub.dispatch` 不落地。** `hub.dispatch` 只入队，队列由
+  `HubService.run` 消费；`ExecuteService` 路径下没有消费者，命令永远不会执行。
+  `knowledge.commands.Search` 与 `memory.commands.OnReplyFinished` 改为 A2 的 `relay`，
+  它在 Hub 未启动时回落到 `executor._submit`。`observe.commands.ExportTrace` 同上。
+- **`Memory.Recall` 的前缀少了通配符。** `KVProtocol.keys(pattern)` 是 LIKE 语义，
+  需要 `*`；`Recall` 传的是 `memory:{scope}:{subject}:`，只能精确匹配，召回恒为空。
+  改为 `f'{prefix}*'`。
+
+### 已知遗留
+
+- `skill.activated` 只有旁路 Event，没有写进 SSE 的 client chunk。
+- 检索质量未验收：`HashEmbeddingProtocol` 是伪向量，且 `InMemoryVectorProtocol` 不持久化。
+- 长期记忆打分为关键词词集交集，非向量召回；抽取只认 `prefer` / `remember` 这类显式表述。
+- `adapters.memory_store` 只给 `memory.longterm`；`adapters.memory`（mcp/team/schedule 共用）
+  仍是进程内 `MemoryProtocol`。

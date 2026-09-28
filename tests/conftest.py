@@ -58,7 +58,8 @@ async def persistent_execute(tmp_path, monkeypatch):
         async with bootstrap.services.executor:
             for key in (
                 'bollydog.Session', 'session.store', 'agent.assistant', 'model.chat',
-                'context.default', 'tool.toolkit', 'workspace.local', 'plan.notebook',
+                'model.embed', 'context.default', 'tool.toolkit', 'workspace.local',
+                'plan.notebook', 'skill.hub', 'knowledge.base', 'memory.longterm',
                 'credential.vault', 'observe.tracer',
             ):
                 svc = bootstrap.services.get(key)

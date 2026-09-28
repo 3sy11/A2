@@ -33,7 +33,7 @@ class PlanService(A2Service):
             mark = {'pending': '[ ]', 'in_progress': '[~]', 'completed': '[x]'}.get(
                 task.get('state', 'pending'), '[ ]'
             )
-            lines.append(f'{mark} {task.get("subject", task.get("task_id", ""))}')
+            lines.append(f'{mark} {task.get("task_id", "")}: {task.get("subject", "")}')
         return '\n'.join(lines)
 
     def progress(self, plan: dict) -> dict:

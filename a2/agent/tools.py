@@ -53,3 +53,25 @@ class PresentFiles(BaseCommand):
 
     async def __call__(self) -> dict:
         return {'status': 'ok', 'title': self.title, 'refs': self.refs}
+
+
+class ActivateToolGroup(BaseCommand):
+    """Open or close a group of tools for this session."""
+    group: ClassVar[str] = 'basic'
+    concurrency_safe: ClassVar[bool] = False
+
+    enable: list = []
+    disable: list = []
+
+    async def __call__(self) -> dict:
+        session_id = self.data.get('session_id', '')
+        result = await relay(app.resolve_ref(
+            app.tool_ref, 'ActivateGroup',
+            session_id=session_id, enable=self.enable, disable=self.disable,
+        ))
+        active = result.get('groups', [])
+        return {
+            **result,
+            'active_groups': active,
+            'dormant_groups': app.get_dependency(app.tool_ref).dormant_groups(active),
+        }

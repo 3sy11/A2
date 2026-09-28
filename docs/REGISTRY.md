@@ -1,8 +1,8 @@
 # A2 当前框架设计与实现现状
 
-> 基线日期：2026-09-12
+> 基线日期：2026-09-28
 >
-> A2 commit：`21cc06a`
+> A2 commit：P0 基线 `21cc06a`，P1-A（§4.4）为其后的工作区改动
 >
 > bollydog：本地源码 `/Users/mii/Workspace/bollydog`，version `0.1.5`，commit `63312c9`
 >
@@ -74,7 +74,7 @@ Service/Command 骨架，但大多数还没有接入 `Reply` 主链路，也没�
 使用 `config/agent.toml` 构造 Bootstrap，当前得到：
 
 - 23 个 Service，含 7 个 bollydog 框架 Service 和 16 个 A2 Service。
-- 70 个已注册 Command destination。
+- 71 个已注册 Command destination。
 - 37 个 Event topic，共 37 个 Event 绑定。
 - A2 声明了 `agent.assistant.Reply` 和 `entry.http.Chat` 两条 SSE 路由；只有设置
   `ENTRYPOINT_HTTP_ENABLED=1` 时，bollydog 的 `HttpService` 才会加载并实际暴露它们。
@@ -87,34 +87,54 @@ Chat 和 Embedding 已分别扫描 `a2.model.chat_commands` 与
 
 | Service | 当前后端 | 当前状态 |
 |---|---|---|
-| `agent.assistant` | 无自有 Protocol | ReAct 骨架可运行；未接入 plan/skill/knowledge/memory/credential/team |
+| `agent.assistant` | 无自有 Protocol | ReAct 骨架可运行；已接入 plan/skill/knowledge/memory（见 §4.4）；未接入 credential/team |
 | `model.chat` | `ScriptedChatProtocol` | 只是确定性测试模型，无生产 LLM |
 | `model.embed` | `HashEmbeddingProtocol` | 伪向量，适合测试 |
-| `context.default` | bollydog Session -> `SQLiteProtocol` | 用户消息、助手消息和工具结果可跨重启恢复；无 RAG/记忆/技能/计划注入 |
-| `tool.toolkit` | `RulePermissionProtocol` | 列表、分组、鉴权、执行可用；默认规则为空，大结果只截断不归档 |
+| `context.default` | bollydog Session -> `SQLiteProtocol` | 用户消息、助手消息和工具结果可跨重启恢复；`Assemble` 已支持 RAG/记忆/技能/计划四类注入槽位 |
+| `tool.toolkit` | `RulePermissionProtocol` | 列表、分组、鉴权、执行可用；默认规则为空，大结果只截断不归档；分组可由模型经 `ActivateToolGroup` 运行时打开 |
 | `session.store` | `SQLiteProtocol` | 保存会话、已结束回合、等待用户处理的回合和 SSE 事件；支持重启后读取 |
 | `workspace.local` | `LocalSandboxProtocol` | 文件与本地 shell 可用；不是容器或进程隔离沙箱 |
-| `plan.notebook` | `SQLiteProtocol` | CRUD 数据可跨重启保存；未接入 Agent |
-| `skill.hub` | 直接文件系统 | 可扫描/匹配/读取；未接入 Agent，InstallSkill 是 stub |
-| `memory.longterm` | `MemoryProtocol` | 关键词提取与词集打分骨架；非向量召回，未注入 Agent，非跨会话持久化 |
-| `knowledge.base` | `InMemoryVectorProtocol` | 文本分块/伪向量检索可单独运行；未接入 Context |
+| `plan.notebook` | `SQLiteProtocol` | CRUD 数据可跨重启保存；已接入 Agent（`plan` 工具组 + 每轮清单注入） |
+| `skill.hub` | 直接文件系统 | 可扫描/匹配/读取；一级目录注入主链路，`LoadSkill` 发 `SkillActivated`；InstallSkill 仍是 stub |
+| `memory.longterm` | `SQLiteProtocol` | 关键词提取与词集打分骨架；按 `user_id` 跨会话召回并注入，已跨重启持久化；非向量召回 |
+| `knowledge.base` | `InMemoryVectorProtocol` | 文本分块/伪向量检索；已接入 `Assemble` 注入带出处片段；向量库本身不持久化 |
 | `mcp.gateway` | 错配为 `MemoryProtocol` | `ConnectServer` 会因缺少 `list_tools()` 直接失败，尚不是可用 stub |
 | `credential.vault` | `SQLiteProtocol` | CRUD 数据可跨重启保存；仍未注入 model/tool，当前 XOR 仅适合开发环境 |
 | `team.room` | `MemoryProtocol` | 顺序/并行/广播 Command 存在；只有一个默认 agent，无完整协作配置 |
 | `observe.tracer` | `SQLiteProtocol` | Event 转 span 可跨重启保存；无聚合和完整回放保证 |
 | `schedule.runner` | `MemoryProtocol` | 间隔轮询与 dispatch 骨架；无 cron/通知/失败隔离/停放态清理 |
-| `entry.http` | 路由声明服务（不是 HTTP server） | `Chat` 会 OpenSession 后中继 Reply；实际 HTTP server 由 bollydog 环境开关控制；不会加载持久化历史 |
+| `entry.http` | 路由声明服务（不是 HTTP server） | `Chat` 会 OpenSession 后中继 Reply，并透传 `user_id`；实际 HTTP server 由 bollydog 环境开关控制；不会加载持久化历史 |
 
 ### 4.3 当前 Reply 主链路做了什么
 
-1. 打开会话；若服务刚重启且内存上下文为空，从已保存回合恢复消息。
-2. 将本次用户消息写入上下文，再装配模型输入。
+1. 打开会话（带上调用方的 `user_id`）；若服务刚重启且内存上下文为空，从已保存回合恢复消息。
+2. 将本次用户消息写入上下文，再采集可选上下文来源并装配模型输入。
 3. 每条发送给前端的事件先写入 `session.store`，再输出到 SSE。
 4. 每次开始调用模型或工具时，记录当前回合执行位置。
 5. 普通结束、中断和模型失败时保存已完成回合；危险工具确认和追问时保存等待用户处理的信息。
 6. 用户后续批准、拒绝或回答后，`Resume` 使用同一 turn_id 继续；服务在工具执行中重启时不会自动重复执行该工具。
 
 上下文压缩仍是字符串截取，尚未调用模型生成摘要。
+
+### 4.4 上下文注入（P1-A）
+
+`Reply` 每轮迭代前调用 `AgentService.collect_sources()` 采集四类来源，
+以纯数据传给 `context.default.Assemble`，由 `ContextService` 渲染成 system 消息。
+采集与渲染分离，是为了让 `ContextService` 不依赖 knowledge/memory/skill 服务。
+
+| 来源 | 开关（默认 `off`） | 采集命令 | 渲染位置 |
+|---|---|---|---|
+| 技能目录 | `skill_mode = 'catalog'` | `skill.hub.ListSkills`（一级披露，只取 name + description） | summary 之后 |
+| 长期记忆 | `memory_mode = 'recall_write'` | `memory.longterm.Recall`（有 `user_id` 用 user 作用域，否则回落到 session） | 技能之后 |
+| 任务清单 | `plan_mode = 'tool'` | `plan.notebook.ListTasks` 的 `rendered` 字段 | 记忆之后 |
+| 检索片段 | `rag_mode = 'on'` | `knowledge.base.Search`，命中项归一化出 `source` 以便标注出处 | 清单之后 |
+
+采集有硬上限（`max_skills` / `memory_top_k` / `rag_top_k`，每条片段按 500 字符截断），
+避免注入本身把 token 推过压缩阈值。任一来源失败只降级为空，不会让整个回合失败。
+
+技能正文（三级披露）与计划清单的创建/更新都由模型主动调用工具完成，分别落在
+`skill` 与 `plan` 工具组；`Reply` 按 session 键 `tool_groups:{session_id}` 决定暴露哪些分组，
+模型可用 `agent.assistant.ActivateToolGroup` 打开其他分组（S23）。
 
 ## 5. 29 个目标场景的实现状态
 
@@ -128,17 +148,17 @@ Chat 和 Embedding 已分别扫描 `a2.model.chat_commands` 与
 |---|---|---|---|
 | S01 直接回答 | 已验收 | Reply -> Assemble -> Scripted Generate -> finished | 需生产模型和真实 provider 验收 |
 | S02 读文件回答 | 部分 | ReadPath 单命令测试通过，Reply 有 Invoke 骨架 | 没有验证“模型决策 -> 工具 -> 根据结果回答”的 E2E |
-| S03 规划驱动 | 未实现 | Plan CRUD 存在 | Reply 从不调用 CreatePlan/UpdateTask/ListTasks，无 `plan.updated` |
+| S03 规划驱动 | 部分 | `plan` 工具组（CreatePlan/UpdateTask/ListTasks）+ 每轮注入渲染后的清单 | 由模型自行决定建清单，无多步请求自动识别；清单变化经 `tool.result` 呈现，无独立 `plan.updated` 客户端事件 |
 | S04 并行工具 | 未验收 | 工具服务保留并行分批规则 | P0 为了让每个工具调用都在独立保存点完成，Reply 当前按顺序执行；恢复并行执行与对应测试属于后续工作 |
 | S05 中断 | 部分 | 中断请求会保留 turn_id、已完成回合和事件 | 仍只在模型/工具边界生效；未使用硬取消 |
 | S06 危险操作确认 | 已验收 | 保存待执行工具，输出确认请求；批准后只执行该工具一次 | 未覆盖复杂并行工具批次 |
 | S07 追问后续跑 | 已验收 | AskHuman 保存问题、选项和上下文，Resume 写入用户回答后继续 | 未覆盖多轮追问 |
 | S08 上下文压缩 | 部分 | 阈值判断、滚动窗口、字符串摘要 | 未调用模型生成摘要；用户历史没有完整写入 context |
 | S09 跨日续会话 | 已验收 | SQLite 保存回合；新进程可 LoadSession 并恢复上下文 | 仅验证单机 SQLite；多副本尚未实现 |
-| S10 文档 RAG 与引用 | 未实现 | 入库和伪向量检索骨架 | Assemble 固定 `rag_hits=[]`，无主链路检索和可验证引用 |
-| S11 跨会话长期记忆 | 未实现 | ReplyFinished 后关键词提取骨架 | 主体用 session_id 而非 user_id；无召回注入；存储不持久 |
+| S10 文档 RAG 与引用 | 部分 | `Assemble` 注入 `knowledge.base.Search` 的命中片段并标出 `[source]` 出处 | 向量是 `HashEmbeddingProtocol` 伪向量且库不持久化，只验证了接线，检索质量未验收 |
+| S11 跨会话长期记忆 | 部分 | 按 `user_id` 召回并注入；写入同样按 user 作用域，落 SQLite 可跨重启 | 打分为关键词词集交集，非向量召回；只有 `prefer`/`remember` 这类显式表述会被抽取 |
 | S12 动态 MCP | 未实现 | 动态 Command 造类逻辑存在 | Protocol 错配 MemoryProtocol，ConnectServer 实测报缺少 `list_tools` |
-| S13 技能渐进披露 | 未实现 | 文件扫描/匹配/读取命令存在 | Agent 不会发现或加载技能，无 `skill.activated` 主链路 |
+| S13 技能渐进披露 | 部分 | 一级目录注入 system 消息；`LoadSkill` 作为工具按需拉正文并发 `SkillActivated` | 无 `skill.activated` 客户端 chunk（只走旁路 Event）；`InstallSkill` 仍是 stub |
 | S14 子智能体 | 未实现 | Spawn 可中继另一 Agent Reply | 只配置一个 agent；Spawn 未暴露给默认工具组；未实现 inherit_context/depth |
 | S15 多智能体协作 | 部分 | Sequential/Fanout/Broadcast/Topic 命令存在 | 只有一个 Agent 实例，无收敛策略和场景验收 |
 | S16 隔离运行代码 | 部分 | 本地 cwd 限制 + subprocess shell | 不是真实隔离沙箱，传入完整宿主环境，命令策略仅字符串黑名单 |
@@ -148,7 +168,7 @@ Chat 和 Embedding 已分别扫描 `a2.model.chat_commands` 与
 | S20 追踪与回放 | 部分 | `# -> OnAny` 写入 SQLite | span 字段和聚合有限；无场景测试 |
 | S21 定时报表 | 部分 | task + interval polling + dispatch | 不支持每日 08:00/cron，无通知、失败隔离和多实例租约 |
 | S22 自动凭证 | 未实现 | Credential CRUD 写入 SQLite | model/tool 从不取用凭证；默认密钥 + XOR 不符合安全保管目标 |
-| S23 工具分组 | 部分 | basic/edit/exec/mcp 配置 + ActivateGroup | Agent 始终显式传 `basic`，没有任务匹配后自动激活其他组 |
+| S23 工具分组 | 部分 | basic/edit/exec/mcp/skill/plan/knowledge 配置 + `ActivateToolGroup` 元工具；`Reply` 按 session 键取分组 | 没有任务匹配后自动激活；`always_on_groups` 是 toolkit 全局的，无 per-agent 白名单 |
 | S24 SSE 实时流 | 部分 | 每条前端事件持久化，可用 `ReplayEvents(last_seq)` 读取断线后事件 | 并行工具无实时流 |
 | S25 模型失败保留现场 | 部分 | 模型失败保存 retry 状态，用户可 Resume | 无完整场景测试和生产模型验证 |
 | S26 工具三次失败熔断 | 未实现 | 单次异常转 `tool.result:error` | 无失败计数、重试、熔断或请求用户介入 |
@@ -187,12 +207,15 @@ Chat 和 Embedding 已分别扫描 `a2.model.chat_commands` 与
 
 ### P1：把已有领域骨架接入 Agent
 
-1. 将 Plan、Skill、Knowledge、Memory、Spawn 和工具分组激活接入 `Reply/Assemble`。
+1. **已完成（Spawn 除外）**：Plan、Skill、Knowledge、Memory 与工具分组激活已接入
+   `Reply/Assemble`，见 §4.4。`Spawn` 仍可中继子 agent，但未暴露为工具，也没有
+   `inherit_context`/`depth` 语义。
 2. 实现大结果 `truncate -> StoreArtifact -> summary + ref`。
 3. 实现 `structured_schema` 的动态终止工具和校验。
-4. 分离“同模型重试”与“跨模型 fallback”，并实现工具失败熔断和预算上限。
+4. 分离”同模型重试”与”跨模型 fallback”，并实现工具失败熔断和预算上限。
 5. 设计并恢复安全工具的并行执行：每个并行工具都必须记录独立执行状态，并补齐断线和重启场景测试。
 6. 为 S02–S29 增加场景级端到端测试，不再以 Command 存在代替场景验收。
+   （P1-A 已为 S03/S10/S11/S13/S23 补上，其余场景仍缺。）
 
 ### P2：生产可用性
 
@@ -204,11 +227,11 @@ Chat 和 Embedding 已分别扫描 `a2.model.chat_commands` 与
 
 ## 8. 验证基线
 
-2026-09-12 实际执行：
+2026-09-28 实际执行：
 
 ```text
-.venv/bin/pytest tests/ -v
-18 passed
+.venv/bin/pytest tests/ -q
+27 passed
 
 /Users/mii/Workspace/bollydog/.venv/bin/pytest \
   -c /Users/mii/Workspace/bollydog/pyproject.toml \
@@ -217,10 +240,16 @@ Chat 和 Embedding 已分别扫描 `a2.model.chat_commands` 与
 154 passed in 1.61s
 ```
 
-A2 的 18 个测试覆盖：消息/块模型、S01、会话重启恢复、确认后执行、确认参数错误时保留
+A2 的 18 个 P0 测试覆盖：消息/块模型、S01、会话重启恢复、确认后执行、确认参数错误时保留
 待处理操作、追问后继续、中断保存、事件重放、工具执行中重启的保守恢复、计划/凭证/追踪
 持久化和模型命令注册隔离。
-它们不覆盖其余目标场景。
+
+P1-A 新增 9 个测试（`tests/test_p1_domains.py`）覆盖：`user_id` 贯通到会话与
+`ReplyFinished`、`Assemble` 四类注入槽位的渲染与空注入时行为不变、技能目录注入 +
+`LoadSkill` 按需拉正文并发出 `SkillActivated`、文档入库后检索片段带出处注入、
+长期记忆跨会话召回与跨重启持久化、计划创建与推进、工具分组按需打开。
+
+它们仍不覆盖其余目标场景。
 
 额外的运行时探测结果：
 
